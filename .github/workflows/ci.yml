@@ -1,0 +1,31 @@
+name: Go CI
+
+on:
+  push:
+    branches: [main] # Or your default branch
+  pull_request:
+    branches: [main] # Or your default branch
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable" # Or your specific Go version
+
+      - name: Build
+        run: go build ./... # Check if the code builds
+
+      - name: Test
+        run: go test -race -vet=off ./... # Run tests with race detector
+        # -vet=off might be needed if fuzz tests cause issues with vet
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7.0.0 # Use the latest version
+        with:
+          version: latest # Or your specific linter version

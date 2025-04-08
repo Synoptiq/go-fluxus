@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*" # Trigger on tags like v1.0.0, v0.1.1, etc.
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetches all history for changelog generation
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable" # Or specify your Go version
+
+      # --- ADD THIS STEP ---
+      - name: Run tests
+        run: go test ./...
+      # --- END OF ADDED STEP ---
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          # Optional: specify GoReleaser version, otherwise latest is used
+          # version: latest
+          args: release --clean # Run the release command
+        env:
+          # GITHUB_TOKEN is automatically provided by GitHub Actions
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

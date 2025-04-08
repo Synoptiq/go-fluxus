@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 300" width="300" height="300">
+  <defs>
+    <!-- Gradient: Blue to Purple -->
+    <linearGradient id="chainGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2575FC; stop-opacity:1" /> <!-- Bright Blue -->
+      <stop offset="100%" style="stop-color:#6A11CB; stop-opacity:1" /> <!-- Deep Purple -->
+    </linearGradient>
+    
+    <!-- Subtle Glow Filter -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Background: Dark Gray -->
+  <rect width="300" height="300" fill="#222" rx="30" ry="30"/>
+  
+  <!-- Chain Links Group -->
+  <g transform="translate(20, 100)" filter="url(#glow)">
+    <!-- First Link -->
+    <path d="M20,40 Q40,10 60,40 T100,40" 
+          fill="none" 
+          stroke="url(#chainGrad)" 
+          stroke-width="12" 
+          stroke-linecap="round"/>
+    
+    <!-- Second Link -->
+    <path d="M80,40 Q100,10 120,40 T160,40" 
+          fill="none" 
+          stroke="url(#chainGrad)" 
+          stroke-width="15" 
+          stroke-opacity="0.8" 
+          stroke-linecap="round"/>
+    
+    <!-- Third Link -->
+    <path d="M140,40 Q160,10 180,40 T220,40" 
+          fill="none" 
+          stroke="url(#chainGrad)" 
+          stroke-width="12" 
+          stroke-opacity="0.6" 
+          stroke-linecap="round"/>
+    
+    <!-- Fourth Link (Fading) -->
+    <path d="M200,40 Q220,10 240,40" 
+          fill="none" 
+          stroke="url(#chainGrad)" 
+          stroke-width="12" 
+          stroke-opacity="0.4" 
+          stroke-linecap="round"/>
+  </g>
+  
+  <!-- Project Name Text -->
+  <text x="150" y="260"
+        font-family="Inter, 'Roboto Mono', monospace"
+        font-weight="700"
+        font-size="42"
+        text-anchor="middle"
+        fill="#F0F0F0">
+    FLUXUS
+  </text>
+</svg>

@@ -1,0 +1,25 @@
+project_name: fluxus
+
+builds:
+  - skip: true
+
+# Optional: Run go mod tidy before release
+before:
+  hooks:
+    - go mod tidy
+
+# Keep snapshot config for pre-releases
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+
+# Keep changelog generation
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
