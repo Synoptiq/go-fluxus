@@ -133,6 +133,32 @@ parallel := fluxus.Parallel[Input, Result, Output](
 result, err := parallel.Process(ctx, input)
 ```
 
+### Map (New!)
+
+`Map` applies a single `Stage[I, O]` concurrently to each element of an input slice `[]I`, producing an output slice `[]O`. This is useful for parallelizing the same operation across multiple data items.
+
+```go
+// Stage that processes a single item (e.g., int to string)
+processItem := fluxus.StageFunc[int, string](func(ctx context.Context, item int) (string, error) {
+    // ... process item ...
+    return processedString, nil
+})
+
+// Create a Map stage using the item processor
+mapStage := fluxus.NewMap(processItem).
+    WithConcurrency(runtime.NumCPU()). // Set concurrency limit
+    WithCollectErrors(true)            // Collect all errors instead of failing fast
+
+// Process a slice of inputs
+inputSlice := []int{1, 2, 3, 4, 5}
+results, err := mapStage.Process(ctx, inputSlice)
+
+// If WithCollectErrors(true), err might be a *fluxus.MultiError
+// and results will contain successes and zero values for errors.
+// If WithCollectErrors(false) (default), err is the first error encountered
+// and results will be nil.
+```
+
 ## Advanced Features
 
 ### Circuit Breaker
