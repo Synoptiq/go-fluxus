@@ -2,6 +2,7 @@ package fluxus
 
 import (
 	"fmt"
+	"strings"
 )
 
 // Error types for specific failure scenarios in pipeline processing
@@ -145,6 +146,78 @@ func NewBufferError(batchIndex, offset int, err error) *BufferError {
 	return &BufferError{
 		BatchIndex:    batchIndex,
 		Offset:        offset,
+		OriginalError: err,
+	}
+}
+
+// MultiError holds multiple errors, e.g., from Map or FanOut with CollectErrors.
+type MultiError struct {
+	Errors []error
+}
+
+// NewMultiError creates a new MultiError.
+func NewMultiError(errs []error) *MultiError {
+	// Filter out nil errors
+	nonNilErrs := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			nonNilErrs = append(nonNilErrs, err)
+		}
+	}
+	if len(nonNilErrs) == 0 {
+		return nil // Return nil if there are no actual errors
+	}
+	return &MultiError{Errors: nonNilErrs}
+}
+
+// Error implements the error interface.
+func (m *MultiError) Error() string {
+	if m == nil || len(m.Errors) == 0 {
+		return "no errors"
+	}
+	if len(m.Errors) == 1 {
+		return m.Errors[0].Error()
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d errors occurred:", len(m.Errors))
+	for i, err := range m.Errors {
+		fmt.Fprintf(&b, "\n  [%d] %v", i, err)
+	}
+	return b.String()
+}
+
+// Unwrap provides compatibility with errors.Is/As by returning the first error.
+// You might choose a different behavior depending on your needs.
+func (m *MultiError) Unwrap() error {
+	if m == nil || len(m.Errors) == 0 {
+		return nil
+	}
+	return m.Errors[0]
+}
+
+// MapItemError represents an error that occurred while processing a specific item
+// within a Map stage.
+type MapItemError struct {
+	// ItemIndex is the index of the input item that caused the error
+	ItemIndex int
+	// OriginalError is the underlying error that occurred
+	OriginalError error
+}
+
+// Error implements the error interface for MapItemError.
+func (e *MapItemError) Error() string {
+	return fmt.Sprintf("map stage item %d failed: %v", e.ItemIndex, e.OriginalError)
+}
+
+// Unwrap returns the underlying error for compatibility with errors.Is and errors.As.
+func (e *MapItemError) Unwrap() error {
+	return e.OriginalError
+}
+
+// NewMapItemError creates a new MapItemError with the provided details.
+func NewMapItemError(itemIndex int, err error) *MapItemError {
+	return &MapItemError{
+		ItemIndex:     itemIndex,
 		OriginalError: err,
 	}
 }
