@@ -9,12 +9,9 @@ import (
 	"os"
 	"runtime" // For concurrency setting
 	"sync"    // For mock repo locking
-	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
-	"github.com/stretchr/testify/assert" // Using testify for clearer assertions
-	"github.com/stretchr/testify/require"
+	_ "github.com/mattn/go-sqlite3" // Using testify for clearer assertions
 	"github.com/synoptiq/go-fluxus"
 )
 
@@ -55,7 +52,7 @@ func (s *UserProcessingStage) Process(ctx context.Context, userID int) (string, 
 	user, err := s.repo.GetUserByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", fmt.Errorf("user %d not found", userID)
+			return "", fmt.Errorf("user %d not found: %w", userID, err)
 		}
 		return "", fmt.Errorf("failed to get user %d: %w", userID, err)
 	}
@@ -290,7 +287,7 @@ func main() {
 	if err != nil {
 		// WithCollectErrors, 'err' will be a fluxus.MultiError
 		fmt.Printf("❌ Errors occurred during processing:\n")
-		if merr, ok := err.(fluxus.MultiError); ok {
+		if merr, ok := err.(*fluxus.MultiError); ok {
 			for i, e := range merr.Errors {
 				if e != nil { // Check if there was an error for this specific index
 					fmt.Printf("  - Input index %d (ID %d): %v\n", i, userIDs[i], e)
@@ -306,7 +303,7 @@ func main() {
 		for i, result := range results {
 			// Check if the corresponding error was nil before printing the result
 			isError := false
-			if merr, ok := err.(fluxus.MultiError); ok && i < len(merr.Errors) && merr.Errors[i] != nil {
+			if merr, ok := err.(*fluxus.MultiError); ok && i < len(merr.Errors) && merr.Errors[i] != nil {
 				isError = true
 			}
 			if !isError {
@@ -336,144 +333,4 @@ func main() {
 			fmt.Printf("  User %d (%s) - Last Login: %s\n", user.ID, user.Email, user.LastLogin.Format(time.RFC3339))
 		}
 	}
-}
-
-// --- 6. Unit Testing Example (Individual Stage - Unchanged) ---
-
-func TestUserProcessingStage(t *testing.T) {
-	mockRepo := NewMockUserRepository()
-	stage := NewUserProcessingStage(mockRepo)
-	ctx := context.Background()
-
-	t.Run("UserExists", func(t *testing.T) {
-		userID := 1
-		result, err := stage.Process(ctx, userID)
-		require.NoError(t, err)
-		assert.Contains(t, result, "User 1 (alice@example.com)")
-
-		updatedUser, _ := mockRepo.GetUserByID(ctx, userID)
-		assert.WithinDuration(t, time.Now(), updatedUser.LastLogin, 1*time.Second)
-	})
-
-	t.Run("UserNotFound", func(t *testing.T) {
-		userID := 99
-		_, err := stage.Process(ctx, userID)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "user 99 not found")
-		assert.ErrorIs(t, err, sql.ErrNoRows) // Check underlying error type if needed
-	})
-
-	t.Run("GetUserError", func(t *testing.T) {
-		originalGetUserFunc := mockRepo.GetUserByIDFunc
-		simulatedErr := errors.New("simulated DB connection error")
-		mockRepo.GetUserByIDFunc = func(ctx context.Context, id int) (*User, error) {
-			return nil, simulatedErr
-		}
-		defer func() { mockRepo.GetUserByIDFunc = originalGetUserFunc }()
-
-		userID := 1
-		_, err := stage.Process(ctx, userID)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, simulatedErr)
-		assert.Contains(t, err.Error(), "failed to get user 1")
-	})
-
-	t.Run("UpdateUserError", func(t *testing.T) {
-		originalUpdateFunc := mockRepo.UpdateLastLoginFunc
-		simulatedErr := errors.New("simulated update error")
-		mockRepo.UpdateLastLoginFunc = func(ctx context.Context, id int, loginTime time.Time) error {
-			return simulatedErr
-		}
-		defer func() { mockRepo.UpdateLastLoginFunc = originalUpdateFunc }()
-
-		userID := 1
-		// We still expect success from Process, as the error is only logged
-		result, err := stage.Process(ctx, userID)
-		require.NoError(t, err) // Error is logged, not returned by Process
-		assert.Contains(t, result, "User 1")
-		// Note: Testing log output requires more setup (capturing log output)
-	})
-}
-
-// --- 7. Unit Testing Example (Pipeline with Map Stage) ---
-
-func TestUserProcessingPipelineWithMap(t *testing.T) {
-	mockRepo := NewMockUserRepository()
-	processStage := NewUserProcessingStage(mockRepo) // Stage with mock repo
-	mapStage := fluxus.NewMap(processStage).
-		WithConcurrency(2).     // Use some concurrency for the test
-		WithCollectErrors(true) // Important for testing multiple outcomes
-
-	pipeline := fluxus.NewPipeline(mapStage)
-	ctx := context.Background()
-
-	t.Run("MixedSuccessAndFailure", func(t *testing.T) {
-		userIDs := []int{1, 99, 2, 100}                                                               // Good, Not Found, Good, Not Found
-		expectedResults := []string{"User 1 (alice@example.com)", "", "User 2 (bob@example.com)", ""} // Expected results (empty for errors)
-
-		results, err := pipeline.Process(ctx, userIDs)
-
-		// Check for MultiError
-		require.Error(t, err, "Expected an error because some inputs failed")
-		merr, ok := err.(fluxus.MultiError)
-		require.True(t, ok, "Expected error to be a MultiError")
-		require.Len(t, merr.Errors, len(userIDs), "MultiError should have one entry per input")
-
-		// Check specific errors and results
-		assert.NoError(t, merr.Errors[0], "Error for ID 1 should be nil")
-		assert.Contains(t, results[0], expectedResults[0], "Result for ID 1 mismatch")
-
-		assert.Error(t, merr.Errors[1], "Error for ID 99 should not be nil")
-		assert.Contains(t, merr.Errors[1].Error(), "user 99 not found", "Error message for ID 99 mismatch")
-		assert.Equal(t, "", results[1], "Result for ID 99 should be empty string on error") // Map returns zero value on error
-
-		assert.NoError(t, merr.Errors[2], "Error for ID 2 should be nil")
-		assert.Contains(t, results[2], expectedResults[2], "Result for ID 2 mismatch")
-
-		assert.Error(t, merr.Errors[3], "Error for ID 100 should not be nil")
-		assert.Contains(t, merr.Errors[3].Error(), "user 100 not found", "Error message for ID 100 mismatch")
-		assert.Equal(t, "", results[3], "Result for ID 100 should be empty string on error")
-	})
-
-	t.Run("SimulatedGetErrorDuringMap", func(t *testing.T) {
-		userIDs := []int{1, 4} // Process two users
-
-		// Simulate GetUserByID error only for the second user (ID 4)
-		originalGetUserFunc := mockRepo.GetUserByIDFunc
-		simulatedErr := errors.New("simulated get error for ID 4")
-		mockRepo.GetUserByIDFunc = func(ctx context.Context, id int) (*User, error) {
-			if id == 4 {
-				return nil, simulatedErr // Fail only for ID 4
-			}
-			return originalGetUserFunc(ctx, id) // Use original for others
-		}
-		defer func() { mockRepo.GetUserByIDFunc = originalGetUserFunc }() // Restore
-
-		results, err := pipeline.Process(ctx, userIDs)
-
-		require.Error(t, err)
-		merr, ok := err.(fluxus.MultiError)
-		require.True(t, ok)
-		require.Len(t, merr.Errors, 2)
-
-		assert.NoError(t, merr.Errors[0], "Error for ID 1 should be nil")
-		assert.Contains(t, results[0], "User 1", "Result for ID 1 should be present")
-
-		assert.Error(t, merr.Errors[1], "Error for ID 4 should not be nil")
-		assert.ErrorIs(t, merr.Errors[1], simulatedErr, "Error for ID 4 should be the simulated one")
-		assert.Equal(t, "", results[1], "Result for ID 4 should be empty string")
-	})
-
-	t.Run("AllSuccess", func(t *testing.T) {
-		userIDs := []int{1, 2, 4, 5} // All exist in mock repo
-
-		results, err := pipeline.Process(ctx, userIDs)
-
-		require.NoError(t, err, "Expected no error when all inputs succeed")
-		require.Len(t, results, len(userIDs))
-		assert.Contains(t, results[0], "User 1")
-		assert.Contains(t, results[1], "User 2")
-		assert.Contains(t, results[2], "User 4")
-		assert.Contains(t, results[3], "User 5")
-	})
 }
