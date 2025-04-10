@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -541,4 +543,195 @@ func (t *Timeout[I, O]) Process(ctx context.Context, input I) (O, error) {
 	}
 
 	return result, nil
+}
+
+// Map applies a given stage to each element of an input slice concurrently.
+type Map[I, O any] struct {
+	stage         Stage[I, O]
+	concurrency   int
+	collectErrors bool // Option to collect all errors
+	errHandler    func(error) error
+}
+
+// NewMap creates a new Map stage.
+func NewMap[I, O any](stage Stage[I, O]) *Map[I, O] {
+	return &Map[I, O]{
+		stage:         stage,
+		concurrency:   runtime.NumCPU(), // Default concurrency
+		collectErrors: false,
+		errHandler:    func(err error) error { return err },
+	}
+}
+
+// WithConcurrency sets the concurrency limit.
+func (m *Map[I, O]) WithConcurrency(n int) *Map[I, O] {
+	if n < 1 {
+		n = 1
+	}
+	m.concurrency = n
+	return m
+}
+
+// WithCollectErrors configures error collection behavior.
+func (m *Map[I, O]) WithCollectErrors(collect bool) *Map[I, O] {
+	m.collectErrors = collect
+	return m
+}
+
+// WithErrorHandler adds a custom error handler.
+func (m *Map[I, O]) WithErrorHandler(handler func(error) error) *Map[I, O] {
+	if handler == nil {
+		handler = func(err error) error { return err }
+	}
+	m.errHandler = handler
+	return m
+}
+
+// handleMapItemError encapsulates the logic for handling errors during item processing.
+func (m *Map[I, O]) handleMapItemError(
+	index int,
+	err error,
+	results []O,
+	errs []error,
+	firstErr *atomic.Value,
+	cancel context.CancelFunc,
+) {
+	wrappedErr := NewMapItemError(index, err) // Use the specific error type
+
+	if m.collectErrors {
+		// Need to check if errs is nil here too
+		if errs != nil {
+			errs[index] = wrappedErr
+		}
+		// Store zero value for output on error when collecting
+		var zero O
+		results[index] = zero
+	} else if firstErr.CompareAndSwap(nil, wrappedErr) {
+		// Fail fast: store the first error and cancel the context
+		cancel() // Cancel the context for other goroutines
+	}
+}
+
+// processMapItem handles the processing of a single item within the Map stage.
+// It's called concurrently by goroutines managed in the main Process method.
+func (m *Map[I, O]) processMapItem(
+	mapCtx context.Context,
+	index int,
+	inputItem I,
+	results []O,
+	errs []error,
+	firstErr *atomic.Value,
+	cancel context.CancelFunc,
+) {
+	// Check for cancellation before actual processing, in case it was cancelled
+	// while this goroutine was waiting to run.
+	select {
+	case <-mapCtx.Done():
+		// If collecting errors, record context cancellation as the error
+		if m.collectErrors {
+			errs[index] = fmt.Errorf("map cancelled for index %d: %w", index, mapCtx.Err())
+		}
+		// If not collecting errors, the cancellation will be handled after wg.Wait()
+		return
+	default:
+		// Process the item using the provided stage
+		output, err := m.stage.Process(mapCtx, inputItem)
+		if err != nil {
+			m.handleMapItemError(index, err, results, errs, firstErr, cancel)
+		} else {
+			// Store successful result
+			results[index] = output
+		}
+	}
+}
+
+// Process implements the Stage interface for Map.
+// It manages the concurrent execution of processMapItem for each input.
+func (m *Map[I, O]) Process(ctx context.Context, inputs []I) ([]O, error) {
+	inputLen := len(inputs)
+	if inputLen == 0 {
+		return []O{}, nil
+	}
+
+	results := make([]O, inputLen)
+	var errs []error // Declare errs, but don't allocate yet
+	if m.collectErrors {
+		errs = make([]error, inputLen) // Allocate only if needed
+	}
+
+	concurrency := m.concurrency
+	if concurrency > inputLen {
+		concurrency = inputLen
+	}
+
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var firstErr atomic.Value // Stores the first error in fail-fast mode
+
+	// Create a cancellable context specific to this map operation
+	mapCtx, cancel := context.WithCancel(ctx)
+	defer cancel() // Ensure cancellation propagates if an error occurs
+
+	// Launch goroutines to process items concurrently
+	for i := 0; i < inputLen; i++ {
+		// Check for cancellation before dispatching new work
+		// This is important for fail-fast behavior
+		select {
+		case <-mapCtx.Done():
+			goto finish // Context cancelled (likely due to an error or external cancellation)
+		default:
+			// Continue dispatching
+		}
+
+		// Acquire semaphore slot
+		select {
+		case sem <- struct{}{}:
+			// Acquired slot
+		case <-mapCtx.Done():
+			// Context cancelled while waiting for semaphore
+			goto finish
+		}
+
+		wg.Add(1)
+		go func(index int, inputItem I) {
+			defer func() {
+				<-sem // Release semaphore slot
+				wg.Done()
+			}()
+
+			// Call the helper function to process the item
+			m.processMapItem(mapCtx, index, inputItem, results, errs, &firstErr, cancel)
+		}(i, inputs[i])
+	}
+
+finish:
+	wg.Wait() // Wait for all dispatched goroutines to complete or acknowledge cancellation
+
+	// --- Error Handling and Result Aggregation ---
+
+	// Check for fail-fast error first
+	if errVal := firstErr.Load(); errVal != nil {
+		// An error occurred and we were in fail-fast mode
+		//nolint:errcheck // False positive: Error is intentionally returned directly after handling.
+		return nil, m.errHandler(errVal.(error))
+	}
+
+	// If collecting errors, aggregate them
+	if m.collectErrors {
+		multiErr := NewMultiError(errs) // Assumes NewMultiError filters out nil errors
+		if multiErr != nil {
+			// Return results along with the MultiError
+			return results, m.errHandler(multiErr)
+		}
+	}
+
+	// If the context was cancelled externally (and not due to a fail-fast error)
+	// Check mapCtx specifically, as the original ctx might not show the cancellation yet.
+	if mapCtx.Err() != nil && !errors.Is(mapCtx.Err(), context.Canceled) {
+		// Return the cancellation error if no other specific error was returned
+		return nil, m.errHandler(fmt.Errorf("map stage cancelled: %w", mapCtx.Err()))
+	}
+
+	// No errors (or errors were collected and there were none)
+	return results, nil
 }

@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -486,6 +489,261 @@ func TestComplexPipeline(t *testing.T) {
 	}
 }
 
+// TestMapBasic tests the basic functionality of the Map stage.
+func TestMapBasic(t *testing.T) {
+	// Stage that converts int to string
+	intToString := fluxus.StageFunc[int, string](func(_ context.Context, input int) (string, error) {
+		return strconv.Itoa(input), nil
+	})
+
+	// Create Map stage
+	mapStage := fluxus.NewMap(intToString).WithConcurrency(2)
+
+	// Process
+	inputs := []int{1, 2, 3, 4, 5}
+	results, err := mapStage.Process(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("Map stage failed: %v", err)
+	}
+
+	// Verify results
+	expected := []string{"1", "2", "3", "4", "5"}
+	if len(results) != len(expected) {
+		t.Fatalf("Expected %d results, got %d", len(expected), len(results))
+	}
+	for i, res := range results {
+		if res != expected[i] {
+			t.Errorf("Expected result %q at index %d, got %q", expected[i], i, res)
+		}
+	}
+}
+
+// TestMapEmptyInput tests the Map stage with an empty input slice.
+func TestMapEmptyInput(t *testing.T) {
+	intToString := fluxus.StageFunc[int, string](func(_ context.Context, input int) (string, error) {
+		return strconv.Itoa(input), nil
+	})
+	mapStage := fluxus.NewMap(intToString)
+
+	results, err := mapStage.Process(context.Background(), []int{})
+	if err != nil {
+		t.Fatalf("Map stage failed with empty input: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("Expected 0 results for empty input, got %d", len(results))
+	}
+}
+
+// TestMapFailFast tests the default error handling (fail on first error).
+func TestMapFailFast(t *testing.T) {
+	expectedErr := errors.New("processing error")
+	// Stage that fails for even numbers
+	failOnEven := fluxus.StageFunc[int, string](func(_ context.Context, input int) (string, error) {
+		if input%2 == 0 {
+			return "", expectedErr
+		}
+		return strconv.Itoa(input), nil
+	})
+
+	mapStage := fluxus.NewMap(failOnEven).WithConcurrency(2)
+
+	inputs := []int{1, 3, 2, 4, 5} // Error should occur at input '2' (index 2)
+	_, err := mapStage.Process(context.Background(), inputs)
+
+	if err == nil {
+		t.Fatal("Expected an error, got nil")
+	}
+
+	// Check if the error is the expected one, potentially wrapped
+	if !errors.Is(err, expectedErr) {
+		t.Errorf("Expected error to wrap %v, got %v", expectedErr, err)
+	}
+
+	// Check if the error message indicates the item index
+	if !strings.Contains(err.Error(), "map stage item") {
+		t.Errorf("Expected error message to contain 'map stage item', got: %s", err.Error())
+	}
+}
+
+// TestMapCollectErrors tests error collection mode.
+func TestMapCollectErrors(t *testing.T) {
+	expectedErr1 := errors.New("error on 2")
+	expectedErr2 := errors.New("error on 4")
+
+	// Stage that fails for even numbers
+	failOnEven := fluxus.StageFunc[int, string](func(_ context.Context, input int) (string, error) {
+		time.Sleep(10 * time.Millisecond) // Add slight delay
+		if input == 2 {
+			return "", expectedErr1
+		}
+		if input == 4 {
+			return "", expectedErr2
+		}
+		return strconv.Itoa(input), nil
+	})
+
+	mapStage := fluxus.NewMap(failOnEven).
+		WithConcurrency(4).
+		WithCollectErrors(true)
+
+	inputs := []int{1, 2, 3, 4, 5}
+	results, err := mapStage.Process(context.Background(), inputs)
+
+	if err == nil {
+		t.Fatal("Expected a MultiError, got nil")
+	}
+
+	// Check if it's a MultiError
+	var multiErr *fluxus.MultiError
+	if !errors.As(err, &multiErr) {
+		t.Fatalf("Expected error to be a *fluxus.MultiError, got %T", err)
+	}
+
+	// Check the number of collected errors
+	if len(multiErr.Errors) != 2 {
+		t.Errorf("Expected 2 errors in MultiError, got %d", len(multiErr.Errors))
+	}
+
+	// Check if the specific errors are present (order might vary due to concurrency)
+	foundErr1 := false
+	foundErr2 := false
+	for _, itemErr := range multiErr.Errors {
+		if errors.Is(itemErr, expectedErr1) {
+			foundErr1 = true
+		}
+		if errors.Is(itemErr, expectedErr2) {
+			foundErr2 = true
+		}
+	}
+	if !foundErr1 || !foundErr2 {
+		t.Errorf("Expected MultiError to contain both specific errors, got: %v", multiErr.Errors)
+	}
+
+	// Check the results slice (should contain zero values for failed items)
+	expectedResults := []string{"1", "", "3", "", "5"} // "" is the zero value for string
+	if len(results) != len(expectedResults) {
+		t.Fatalf("Expected %d results, got %d", len(expectedResults), len(results))
+	}
+	for i, res := range results {
+		if res != expectedResults[i] {
+			t.Errorf("Expected result %q at index %d, got %q", expectedResults[i], i, res)
+		}
+	}
+}
+
+// TestMapConcurrencyLimit tests if the concurrency limit is respected.
+func TestMapConcurrencyLimit(t *testing.T) {
+	concurrencyLimit := 2
+	var currentConcurrent atomic.Int32
+	var maxConcurrent atomic.Int32
+
+	// Stage that tracks concurrency
+	trackingStage := fluxus.StageFunc[int, int](func(_ context.Context, input int) (int, error) {
+		concurrent := currentConcurrent.Add(1)
+		// Track maximum observed concurrency
+		for {
+			currentMax := maxConcurrent.Load()
+			if concurrent > currentMax {
+				if maxConcurrent.CompareAndSwap(currentMax, concurrent) {
+					break // Successfully updated max
+				}
+				// Contention, retry load and compare
+				continue
+			}
+			break // Current is not greater than max
+		}
+
+		time.Sleep(50 * time.Millisecond) // Simulate work
+		currentConcurrent.Add(-1)
+		return input * 2, nil
+	})
+
+	mapStage := fluxus.NewMap(trackingStage).WithConcurrency(concurrencyLimit)
+
+	inputs := make([]int, 10) // Process 10 items
+	_, err := mapStage.Process(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("Map stage failed: %v", err)
+	}
+
+	// Check max concurrency
+	observedMax := maxConcurrent.Load()
+	if observedMax > int32(concurrencyLimit) {
+		t.Errorf("Exceeded concurrency limit: expected max %d, observed %d", concurrencyLimit, observedMax)
+	}
+	if observedMax == 0 && len(inputs) > 0 {
+		t.Error("Max concurrency was 0, indicating stage might not have run")
+	}
+	t.Logf("Observed max concurrency: %d (Limit: %d)", observedMax, concurrencyLimit)
+}
+
+// TestMapContextCancellation tests cancellation during processing.
+func TestMapContextCancellation(t *testing.T) {
+	cancelTime := 50 * time.Millisecond
+	stageDuration := 100 * time.Millisecond
+
+	// Stage that sleeps longer than the cancellation time
+	slowStage := fluxus.StageFunc[int, int](func(ctx context.Context, input int) (int, error) {
+		select {
+		case <-time.After(stageDuration):
+			return input, nil
+		case <-ctx.Done():
+			return 0, ctx.Err() // Propagate cancellation error
+		}
+	})
+
+	mapStage := fluxus.NewMap(slowStage).WithConcurrency(4)
+
+	ctx, cancel := context.WithTimeout(context.Background(), cancelTime)
+	defer cancel()
+
+	inputs := make([]int, 10)
+	_, err := mapStage.Process(ctx, inputs)
+
+	if err == nil {
+		t.Fatal("Expected a cancellation error, got nil")
+	}
+
+	// Check if the error is context.DeadlineExceeded or context.Canceled
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Errorf("Expected context.DeadlineExceeded or context.Canceled, got %v", err)
+	}
+}
+
+// TestMapContextCancellationWaiting tests cancellation while waiting for semaphore.
+func TestMapContextCancellationWaiting(t *testing.T) {
+	concurrencyLimit := 1
+	cancelTime := 20 * time.Millisecond
+	stageDuration := 100 * time.Millisecond
+
+	// Stage that sleeps
+	slowStage := fluxus.StageFunc[int, int](func(ctx context.Context, input int) (int, error) {
+		select {
+		case <-time.After(stageDuration):
+			return input, nil
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	})
+
+	mapStage := fluxus.NewMap(slowStage).WithConcurrency(concurrencyLimit)
+
+	ctx, cancel := context.WithTimeout(context.Background(), cancelTime)
+	defer cancel()
+
+	// Process more items than concurrency limit to force waiting
+	inputs := make([]int, 5)
+	_, err := mapStage.Process(ctx, inputs)
+
+	if err == nil {
+		t.Fatal("Expected a cancellation error, got nil")
+	}
+
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Errorf("Expected context.DeadlineExceeded or context.Canceled, got %v", err)
+	}
+}
+
 // BenchmarkSimplePipeline benchmarks a simple pipeline with a single stage
 func BenchmarkSimplePipeline(b *testing.B) {
 	// Create a simple stage
@@ -906,6 +1164,189 @@ func BenchmarkChainDepth(b *testing.B) {
 			}
 		})
 	}
+}
+
+// BenchmarkMap benchmarks the Map stage with varying concurrency and input size.
+func BenchmarkMap(b *testing.B) {
+	// Simple stage for benchmarking
+	processItem := fluxus.StageFunc[int, string](func(_ context.Context, input int) (string, error) {
+		// Simulate some CPU work without heavy allocation
+		result := input
+		for i := 0; i < 50; i++ {
+			result = (result*17 + 13) % 1000000
+		}
+		return strconv.Itoa(result), nil
+	})
+
+	inputSizes := []int{10, 100, 1000}
+	concurrencyLevels := []int{1, runtime.NumCPU(), runtime.NumCPU() * 4, 0} // 0 means default (NumCPU)
+
+	for _, size := range inputSizes {
+		inputs := make([]int, size)
+		for i := 0; i < size; i++ {
+			inputs[i] = i
+		}
+
+		for _, conc := range concurrencyLevels {
+			concurrencyLabel := strconv.Itoa(conc)
+			if conc == 0 {
+				concurrencyLabel = "DefaultCPU"
+			}
+
+			mapStage := fluxus.NewMap(processItem)
+			if conc > 0 {
+				mapStage = mapStage.WithConcurrency(conc)
+			}
+
+			b.Run(fmt.Sprintf("Size%d_Conc%s", size, concurrencyLabel), func(b *testing.B) {
+				ctx := context.Background()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					_, _ = mapStage.Process(ctx, inputs)
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkMapVsManual compares Map stage to manual goroutine implementation.
+func BenchmarkMapVsManual(b *testing.B) {
+	// Simple stage for benchmarking
+	processItem := func(input int) string {
+		result := input
+		for i := 0; i < 50; i++ {
+			result = (result*17 + 13) % 1000000
+		}
+		return strconv.Itoa(result)
+	}
+	stageFunc := fluxus.StageFunc[int, string](func(_ context.Context, input int) (string, error) {
+		return processItem(input), nil
+	})
+
+	inputSize := 1000
+	inputs := make([]int, inputSize)
+	for i := 0; i < inputSize; i++ {
+		inputs[i] = i
+	}
+
+	concurrency := runtime.NumCPU()
+
+	// Benchmark Map stage
+	b.Run("MapStage", func(b *testing.B) {
+		mapStage := fluxus.NewMap(stageFunc).WithConcurrency(concurrency)
+		ctx := context.Background()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = mapStage.Process(ctx, inputs)
+		}
+	})
+
+	// Benchmark Manual Goroutines with Semaphore
+	b.Run("ManualGoroutines", func(b *testing.B) {
+		ctx := context.Background()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			// --- Manual Implementation ---
+			results := make([]string, inputSize)
+			sem := make(chan struct{}, concurrency)
+			var wg sync.WaitGroup
+
+			for j := 0; j < inputSize; j++ {
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					// Handle cancellation if needed, skipped for benchmark simplicity.
+					// The break only exits the select, which is acceptable here as
+					// full cancellation handling isn't the focus of this benchmark.
+					//nolint:staticcheck // SA4011: Simple break is intentional for benchmark simplicity.
+					break
+				}
+
+				wg.Add(1)
+				go func(index int, item int) {
+					defer func() {
+						<-sem
+						wg.Done()
+					}()
+					results[index] = processItem(item)
+				}(j, inputs[j])
+			}
+			wg.Wait()
+			// --- End Manual Implementation ---
+			_ = results // Use results to prevent optimization
+		}
+	})
+}
+
+// BenchmarkMapVsBuffer compares Map stage to Buffer stage with internal concurrency.
+func BenchmarkMapVsBuffer(b *testing.B) {
+	// Simple stage for benchmarking
+	processItem := func(input int) string {
+		result := input
+		for i := 0; i < 50; i++ {
+			result = (result*17 + 13) % 1000000
+		}
+		return strconv.Itoa(result)
+	}
+	stageFunc := fluxus.StageFunc[int, string](func(_ context.Context, input int) (string, error) {
+		return processItem(input), nil
+	})
+
+	inputSize := 1000
+	inputs := make([]int, inputSize)
+	for i := 0; i < inputSize; i++ {
+		inputs[i] = i
+	}
+
+	concurrency := runtime.NumCPU()
+
+	// Benchmark Map stage
+	b.Run("MapStage", func(b *testing.B) {
+		mapStage := fluxus.NewMap(stageFunc).WithConcurrency(concurrency)
+		ctx := context.Background()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = mapStage.Process(ctx, inputs)
+		}
+	})
+
+	// Benchmark Buffer stage with internal concurrency
+	b.Run("BufferWithInternalConc", func(b *testing.B) {
+		bufferStage := fluxus.NewBuffer(inputSize, // Process all items in one batch
+			func(ctx context.Context, batch []int) ([]string, error) {
+				// --- Concurrency logic inside buffer processor ---
+				batchLen := len(batch)
+				results := make([]string, batchLen)
+				sem := make(chan struct{}, concurrency)
+				var wg sync.WaitGroup
+
+				for j := 0; j < batchLen; j++ {
+					select {
+					case sem <- struct{}{}:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+
+					wg.Add(1)
+					go func(index int, item int) {
+						defer func() {
+							<-sem
+							wg.Done()
+						}()
+						results[index] = processItem(item)
+					}(j, batch[j])
+				}
+				wg.Wait()
+				// --- End Concurrency logic ---
+				return results, nil
+			})
+
+		ctx := context.Background()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = bufferStage.Process(ctx, inputs)
+		}
+	})
 }
 
 func FuzzChain(f *testing.F) {
