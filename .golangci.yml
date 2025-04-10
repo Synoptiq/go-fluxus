@@ -408,6 +408,10 @@ linters:
             golines,
             gocritic,
             funlen,
+            errcheck,
+            errorlint,
+            testifylint,
+            rowserrcheck,
           ]
       - source: "TODO"
         linters: [godot]
