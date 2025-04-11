@@ -460,4 +460,4 @@ See [BENCHMARK.md](BENCHMARK.md) for detailed results.
 
 ## License
 
-GPL-3.0 License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) for details.
