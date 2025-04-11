@@ -34,12 +34,12 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
 
 3. **Run tests locally** to ensure they pass:
    ```bash
-   make test
+   go test -v ./...
    ```
 
 4. **Run linters** to ensure code quality:
    ```bash
-   make lint
+   golangci-lint run 
    ```
 
 5. **Commit your changes** with a clear, descriptive message:
@@ -80,11 +80,11 @@ We follow standard Go code style conventions:
 - Every new feature or bug fix should include tests.
 - Run the full test suite with race detection before submitting your PR:
   ```bash
-  make test-race
+  go test -race ./...
   ```
 - For performance-critical changes, include benchmarks:
   ```bash
-  make benchmark
+  go test -bench=Bench -v .
   ```
 
 ## Documentation
@@ -113,7 +113,7 @@ We welcome feature requests! When submitting a feature request:
 
 ## License
 
-By contributing to Fluxus, you agree that your contributions will be licensed under the project's [GPL-3.0 License](LICENSE).
+By contributing to Fluxus, you agree that your contributions will be licensed under the project's [MIT License](LICENSE).
 
 ## Questions
 
