@@ -360,13 +360,6 @@ type JoinByKey[I any, K comparable] struct {
 // NewJoinByKey creates a new JoinByKey stage.
 // The keyFunc is used to extract a comparable key from each input item.
 func NewJoinByKey[I any, K comparable](keyFunc KeyFunc[I, K]) *JoinByKey[I, K] {
-	if keyFunc == nil {
-		// If keyFunc is nil, it's impossible to join, so we should probably panic
-		// or return an error during construction, but for now, let's make it
-		// fail during Process. A better approach might be to return (nil, error)
-		// from the constructor or enforce non-nil.
-		// For simplicity here, we'll let it fail in Process.
-	}
 	return &JoinByKey[I, K]{
 		keyFunc:    keyFunc,
 		errHandler: func(err error) error { return err }, // Default error handler
