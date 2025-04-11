@@ -1,4 +1,8 @@
 # Fluxus - Go Pipeline Library
+![GitHub License](https://img.shields.io/github/license/synoptiq/go-fluxus) ![GitHub tag check runs](https://img.shields.io/github/check-runs/synoptiq/go-fluxus/v1.1.1) ![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/synoptiq/go-fluxus)
+ ![GitHub repo size](https://img.shields.io/github/repo-size/synoptiq/go-fluxus)
+
+
 
 <p align="center">
   <img src="logo.svg" alt="Fluxus Logo" width="100" height="200">
