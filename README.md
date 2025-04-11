@@ -168,6 +168,93 @@ results, err := mapStage.Process(ctx, inputSlice)
 // and results will be nil.
 ```
 
+## Flow Control
+
+### Filter
+
+`Filter` conditionally passes items through, allowing you to create stages that only process items that meet certain criteria.
+ - Takes a `PredicateFunc[T] func(ctx context.Context, item T) (bool, error)`.
+ - If the predicate returns `true`, the item passes.
+ - If `false`, the stage returns the item along with `fluxus.ErrItemFiltered`.
+ - If the predicate errors, that error is propagated.
+
+```go
+// Example: Only allow even numbers
+filterEven := fluxus.NewFilter(func(_ context.Context, i int) (bool, error) {
+    return i%2 == 0, nil
+})
+
+// Usage in a chain:
+// processEven := fluxus.Chain(filterEven, nextStage)
+// output, err := processEven.Process(ctx, 5) // err will be ErrItemFiltered
+// output, err := processEven.Process(ctx, 4) // err will be nil (if nextStage succeeds)
+```
+
+### Router
+
+`Router` conditionally routes an item to one or more downstream stages concurrently (like a conditional `FanOut`).
+ - Takes a `SelectorFunc[I] func(ctx context.Context, item I) ([]int, error)` which returns the indices of the `routes` to execute.
+ - `routes` is a slice of `fluxus.Route[I, O]{ Name string, Stage Stage[I, O] }`.
+ - If the selector returns an empty slice or `nil`, the stage returns `fluxus.ErrNoRouteMatched`.
+ - The output is `[]O`, containing results from the executed stages in the order they were selected.
+ - Use `WithConcurrency(n)` to limit concurrent stage executions.
+
+```go
+// Example: Route strings based on prefix
+stageA := fluxus.StageFunc[string, string](...) // Processes "A:" prefixed strings
+stageB := fluxus.StageFunc[string, string](...) // Processes "B:" prefixed strings
+
+router := fluxus.NewRouter(
+    func(_ context.Context, item string) ([]int, error) {
+        if strings.HasPrefix(item, "A:") {
+            return []int{0}, nil // Route to stageA (index 0)
+        }
+        if strings.HasPrefix(item, "B:") {
+            return []int{1}, nil // Route to stageB (index 1)
+        }
+        if strings.HasPrefix(item, "BOTH:") {
+             return []int{0, 1}, nil // Route to both A and B
+        }
+        return nil, nil // No match
+    },
+    fluxus.Route[string, string]{Name: "Processor A", Stage: stageA},
+    fluxus.Route[string, string]{Name: "Processor B", Stage: stageB},
+).WithConcurrency(2)
+
+// output is []string
+// output, err := router.Process(ctx, "A:data") // Executes stageA -> output: ["resultA"]
+// output, err := router.Process(ctx, "B:data") // Executes stageB -> output: ["resultB"]
+// output, err := router.Process(ctx, "BOTH:data") // Executes stageA & stageB -> output: ["resultA", "resultB"]
+// output, err := router.Process(ctx, "C:data") // err is ErrNoRouteMatched
+```
+
+### JoinByKey
+
+`JoinByKey` groups items from an input slice `[]I` into a `map[K][]I` based on a key extracted by `keyFunc`.
+ - Takes a `KeyFunc[I, K] func(ctx context.Context, item I) (K, error)`.
+ - Useful for collecting and grouping results after a `FanOut` or `Router` stage.
+
+```go
+type Result struct {
+    GroupID int
+    Data    string
+}
+
+// Assume 'results' is []Result from a previous FanOut/Router stage
+// results := []Result{ {1, "a"}, {2, "b"}, {1, "c"} }
+
+joiner := fluxus.NewJoinByKey(func(_ context.Context, r Result) (int, error) {
+    return r.GroupID, nil
+})
+
+// outputMap is map[int][]Result
+outputMap, err := joiner.Process(ctx, results)
+// outputMap would be: map[int][]Result{
+//  1: {{1, "a"}, {1, "c"}},
+//  2: {{2, "b"}},
+// }
+```
+
 ## Advanced Features
 
 ### Circuit Breaker
