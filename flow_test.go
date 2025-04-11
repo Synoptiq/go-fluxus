@@ -75,7 +75,7 @@ func TestFilterPredicateError(t *testing.T) {
 
 // TestFilterContextCancellation tests the Filter stage with context cancellation.
 func TestFilterContextCancellation(t *testing.T) {
-	predicate := func(ctx context.Context, item int) (bool, error) {
+	predicate := func(ctx context.Context, _ int) (bool, error) {
 		// Simulate some work that respects cancellation
 		select {
 		case <-time.After(50 * time.Millisecond):
