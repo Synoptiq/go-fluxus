@@ -637,3 +637,249 @@ func BenchmarkRouterMultipleRoutes(b *testing.B) {
 		})
 	}
 }
+
+// --- JoinByKey Tests ---
+
+type joinItem struct {
+	ID    int
+	Group string
+	Value string
+}
+
+// TestJoinByKeySuccess tests successful grouping by key.
+func TestJoinByKeySuccess(t *testing.T) {
+	keyFunc := func(_ context.Context, item joinItem) (string, error) {
+		return item.Group, nil
+	}
+	joinStage := fluxus.NewJoinByKey(keyFunc)
+
+	inputs := []joinItem{
+		{ID: 1, Group: "A", Value: "apple"},
+		{ID: 2, Group: "B", Value: "banana"},
+		{ID: 3, Group: "A", Value: "apricot"},
+		{ID: 4, Group: "C", Value: "cherry"},
+		{ID: 5, Group: "B", Value: "blueberry"},
+	}
+
+	expected := map[string][]joinItem{
+		"A": {{ID: 1, Group: "A", Value: "apple"}, {ID: 3, Group: "A", Value: "apricot"}},
+		"B": {{ID: 2, Group: "B", Value: "banana"}, {ID: 5, Group: "B", Value: "blueberry"}},
+		"C": {{ID: 4, Group: "C", Value: "cherry"}},
+	}
+
+	outputMap, err := joinStage.Process(context.Background(), inputs)
+
+	require.NoError(t, err)
+	require.NotNil(t, outputMap)
+	require.Len(t, outputMap, 3, "Should have 3 distinct groups")
+
+	// Check contents carefully as map iteration order isn't guaranteed
+	require.ElementsMatch(t, expected["A"], outputMap["A"])
+	require.ElementsMatch(t, expected["B"], outputMap["B"])
+	require.ElementsMatch(t, expected["C"], outputMap["C"])
+}
+
+// TestJoinByKeyEmptyInput tests processing an empty input slice.
+func TestJoinByKeyEmptyInput(t *testing.T) {
+	keyFunc := func(_ context.Context, item joinItem) (string, error) {
+		return item.Group, nil
+	}
+	joinStage := fluxus.NewJoinByKey(keyFunc)
+
+	inputs := []joinItem{}
+
+	outputMap, err := joinStage.Process(context.Background(), inputs)
+
+	require.NoError(t, err)
+	require.NotNil(t, outputMap)
+	require.Empty(t, outputMap, "Output map should be empty for empty input")
+}
+
+// TestJoinByKeyNilKeyFunc tests the error handling when keyFunc is nil.
+func TestJoinByKeyNilKeyFunc(t *testing.T) {
+	// Explicitly create with nil keyFunc
+	joinStage := fluxus.NewJoinByKey[joinItem, string](nil)
+
+	inputs := []joinItem{{ID: 1, Group: "A", Value: "apple"}}
+
+	expectedErr := errors.New("JoinByKey: keyFunc cannot be nil")
+
+	_, err := joinStage.Process(context.Background(), inputs)
+
+	// Use require.ErrorContains because the exact error instance isn't exported
+	require.ErrorContains(t, err, expectedErr.Error())
+}
+
+// TestJoinByKeyFuncError tests when the key function returns an error.
+func TestJoinByKeyFuncError(t *testing.T) {
+	expectedErr := errors.New("key extraction failed")
+	keyFunc := func(_ context.Context, item joinItem) (string, error) {
+		if item.ID == 3 {
+			return "", expectedErr // Fail for item with ID 3
+		}
+		return item.Group, nil
+	}
+	joinStage := fluxus.NewJoinByKey(keyFunc)
+
+	inputs := []joinItem{
+		{ID: 1, Group: "A", Value: "apple"},
+		{ID: 2, Group: "B", Value: "banana"},
+		{ID: 3, Group: "A", Value: "apricot"}, // This one will cause the error
+		{ID: 4, Group: "C", Value: "cherry"},
+	}
+
+	_, err := joinStage.Process(context.Background(), inputs)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, expectedErr, "Error chain should contain the original keyFunc error")
+	require.Contains(t, err.Error(), "JoinByKey keyFunc error for item at index 2", "Error message should provide context")
+}
+
+// TestJoinByKeyContextCancellation tests cancellation during processing.
+func TestJoinByKeyContextCancellation(t *testing.T) {
+	keyFunc := func(ctx context.Context, item joinItem) (string, error) {
+		// Simulate work that respects cancellation
+		select {
+		case <-time.After(10 * time.Millisecond):
+			return item.Group, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	joinStage := fluxus.NewJoinByKey(keyFunc)
+
+	inputs := make([]joinItem, 5) // Create 5 items
+	for i := range inputs {
+		inputs[i] = joinItem{ID: i, Group: fmt.Sprintf("G%d", i%2)}
+	}
+
+	// Create a context that cancels after 25ms (enough for ~2 items)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	_, err := joinStage.Process(ctx, inputs)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// TestJoinByKeyWithErrorHandler tests the custom error handler.
+func TestJoinByKeyWithErrorHandler(t *testing.T) {
+	keyFuncErr := errors.New("key extraction failed")
+	customErr := errors.New("custom handler error")
+
+	keyFunc := func(_ context.Context, item joinItem) (string, error) {
+		if item.ID == 3 {
+			return "", keyFuncErr // Fail for item with ID 3
+		}
+		return item.Group, nil
+	}
+
+	handler := func(err error) error {
+		if errors.Is(err, keyFuncErr) || errors.Is(err, context.Canceled) {
+			// Wrap specific errors
+			return fmt.Errorf("%w: %w", customErr, err)
+		}
+		return err // Return others as is
+	}
+
+	joinStage := fluxus.NewJoinByKey(keyFunc).WithErrorHandler(handler)
+
+	// --- Test Case 1: KeyFunc Error ---
+	inputs := []joinItem{{ID: 3}}
+	_, err := joinStage.Process(context.Background(), inputs)
+	require.Error(t, err)
+	require.ErrorIs(t, err, customErr, "Error should be wrapped by custom handler")
+	require.ErrorIs(t, err, keyFuncErr, "Original keyFunc error should be present")
+
+	// --- Test Case 2: Context Error ---
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()                                // Cancel immediately
+	_, err = joinStage.Process(ctx, inputs) // Input doesn't matter much here
+	require.Error(t, err)
+	require.ErrorIs(t, err, customErr, "Context error should be wrapped by custom handler")
+	require.ErrorIs(t, err, context.Canceled, "Original context error should be present")
+}
+
+// --- Benchmarks ---
+
+// BenchmarkJoinByKeyOverhead measures the overhead of JoinByKey vs manual grouping.
+func BenchmarkJoinByKeyOverhead(b *testing.B) {
+	numItems := 1000
+	numGroups := 10
+	inputs := make([]joinItem, numItems)
+	for i := 0; i < numItems; i++ {
+		inputs[i] = joinItem{
+			ID:    i,
+			Group: fmt.Sprintf("Group-%d", i%numGroups),
+			Value: fmt.Sprintf("Value-%d", i),
+		}
+	}
+
+	keyFunc := func(_ context.Context, item joinItem) (string, error) {
+		return item.Group, nil
+	}
+	joinStage := fluxus.NewJoinByKey(keyFunc)
+	ctx := context.Background()
+
+	b.Run("ManualGrouping", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			resultMap := make(map[string][]joinItem)
+			for _, item := range inputs {
+				// Manual key extraction and append
+				key := item.Group
+				resultMap[key] = append(resultMap[key], item)
+			}
+			// Prevent optimization
+			if len(resultMap) != numGroups {
+				b.Fatalf("Incorrect group count: %d", len(resultMap))
+			}
+		}
+	})
+
+	b.Run("JoinByKeyStage", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			resultMap, err := joinStage.Process(ctx, inputs)
+			if err != nil {
+				b.Fatal(err)
+			}
+			// Prevent optimization
+			if len(resultMap) != numGroups {
+				b.Fatalf("Incorrect group count: %d", len(resultMap))
+			}
+		}
+	})
+}
+
+// BenchmarkJoinByKeyScaling measures performance with varying input sizes.
+func BenchmarkJoinByKeyScaling(b *testing.B) {
+	numGroups := 50
+	keyFunc := func(_ context.Context, item joinItem) (string, error) {
+		return item.Group, nil
+	}
+	joinStage := fluxus.NewJoinByKey(keyFunc)
+	ctx := context.Background()
+
+	for _, numItems := range []int{100, 1000, 10000, 100000} {
+		inputs := make([]joinItem, numItems)
+		for i := 0; i < numItems; i++ {
+			inputs[i] = joinItem{
+				ID:    i,
+				Group: fmt.Sprintf("Group-%d", i%numGroups),
+				Value: fmt.Sprintf("Value-%d", i),
+			}
+		}
+
+		b.Run(fmt.Sprintf("Items_%d", numItems), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, err := joinStage.Process(ctx, inputs)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
