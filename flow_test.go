@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/synoptiq/go-fluxus"
 )
 
@@ -222,4 +227,413 @@ func BenchmarkFilterOverhead(b *testing.B) {
 			_, _ = filteredPipelineStage.Process(ctx, input)
 		}
 	})
+}
+
+// --- Router Tests ---
+
+// Helper stage for router tests
+func makeSimpleStage(id string, delay time.Duration, fail bool) fluxus.Stage[string, string] {
+	return fluxus.StageFunc[string, string](func(ctx context.Context, input string) (string, error) {
+		select {
+		case <-time.After(delay):
+			if fail {
+				return "", fmt.Errorf("stage %s failed", id)
+			}
+			return fmt.Sprintf("%s -> %s", input, id), nil
+		case <-ctx.Done():
+			return "", fmt.Errorf("stage %s cancelled: %w", id, ctx.Err())
+		}
+	})
+}
+
+// TestRouterSingleRoute tests routing to a single selected stage.
+func TestRouterSingleRoute(t *testing.T) {
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: makeSimpleStage("A", 0, false)},
+		{Name: "B", Stage: makeSimpleStage("B", 0, false)},
+	}
+	selector := func(_ context.Context, item string) ([]int, error) {
+		if item == "route-to-A" {
+			return []int{0}, nil // Select route A
+		}
+		return nil, nil
+	}
+	router := fluxus.NewRouter(selector, routes...)
+
+	output, err := router.Process(context.Background(), "route-to-A")
+	require.NoError(t, err)
+	require.Len(t, output, 1)
+	assert.Equal(t, "route-to-A -> A", output[0])
+}
+
+// TestRouterMultipleRoutes tests routing to multiple selected stages concurrently.
+func TestRouterMultipleRoutes(t *testing.T) {
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: makeSimpleStage("A", 10*time.Millisecond, false)},
+		{Name: "B", Stage: makeSimpleStage("B", 10*time.Millisecond, false)},
+		{Name: "C", Stage: makeSimpleStage("C", 10*time.Millisecond, false)},
+	}
+	selector := func(_ context.Context, item string) ([]int, error) {
+		if item == "route-to-A-C" {
+			return []int{0, 2}, nil // Select routes A and C
+		}
+		return nil, nil
+	}
+	router := fluxus.NewRouter(selector, routes...)
+
+	start := time.Now()
+	output, err := router.Process(context.Background(), "route-to-A-C")
+	duration := time.Since(start)
+
+	require.NoError(t, err)
+	require.Len(t, output, 2)
+	// Order should match the selected indices order
+	assert.Equal(t, "route-to-A-C -> A", output[0])
+	assert.Equal(t, "route-to-A-C -> C", output[1])
+
+	// Check if it ran concurrently (should take slightly more than 10ms, not 20ms+)
+	assert.Less(t, duration, 20*time.Millisecond, "Execution took too long, likely not concurrent: %v", duration)
+}
+
+// TestRouterNoRouteMatched tests when the selector returns no matching routes.
+func TestRouterNoRouteMatched(t *testing.T) {
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: makeSimpleStage("A", 0, false)},
+	}
+	selector := func(_ context.Context, _ string) ([]int, error) {
+		return nil, nil // No match
+	}
+	router := fluxus.NewRouter(selector, routes...)
+
+	_, err := router.Process(context.Background(), "input")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, fluxus.ErrNoRouteMatched, "Expected ErrNoRouteMatched")
+}
+
+// TestRouterSelectorError tests when the selector function itself returns an error.
+func TestRouterSelectorError(t *testing.T) {
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: makeSimpleStage("A", 0, false)},
+	}
+	expectedErr := errors.New("selector failed")
+	selector := func(_ context.Context, _ string) ([]int, error) {
+		return nil, expectedErr
+	}
+	router := fluxus.NewRouter(selector, routes...)
+
+	_, err := router.Process(context.Background(), "input")
+	require.Error(t, err)
+	require.ErrorIs(t, err, expectedErr, "Expected selector error to be returned")
+	assert.Contains(t, err.Error(), "router selectorFunc error")
+}
+
+// TestRouterSelectorInvalidIndex tests when the selector returns an out-of-bounds index.
+func TestRouterSelectorInvalidIndex(t *testing.T) {
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: makeSimpleStage("A", 0, false)},
+	}
+	selector := func(_ context.Context, _ string) ([]int, error) {
+		return []int{0, 1}, nil // Index 1 is invalid
+	}
+	router := fluxus.NewRouter(selector, routes...)
+
+	_, err := router.Process(context.Background(), "input")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "router selectorFunc returned invalid index 1")
+}
+
+// TestRouterDownstreamError tests when one of the selected stages fails.
+func TestRouterDownstreamError(t *testing.T) {
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: makeSimpleStage("A", 10*time.Millisecond, false)}, // Succeeds
+		{Name: "B", Stage: makeSimpleStage("B", 5*time.Millisecond, true)},   // Fails quickly
+		{Name: "C", Stage: makeSimpleStage("C", 15*time.Millisecond, false)}, // Should be cancelled
+	}
+	selector := func(_ context.Context, _ string) ([]int, error) {
+		return []int{0, 1, 2}, nil // Select all
+	}
+	router := fluxus.NewRouter(selector, routes...)
+
+	_, err := router.Process(context.Background(), "input")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stage B failed")
+	assert.Contains(t, err.Error(), "router target stage (selected index 1) error") // Check error wrapping
+}
+
+// TestRouterContextCancellationDuringSelection tests cancellation before selection.
+func TestRouterContextCancellationDuringSelection(t *testing.T) {
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: makeSimpleStage("A", 0, false)},
+	}
+	selector := func(ctx context.Context, _ string) ([]int, error) {
+		select {
+		case <-time.After(50 * time.Millisecond):
+			return []int{0}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	router := fluxus.NewRouter(selector, routes...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := router.Process(ctx, "input")
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "Expected context deadline exceeded error")
+	// Check if the error comes from the selector or the initial context check
+	assert.True(t, strings.Contains(err.Error(), "router selectorFunc error") || errors.Is(err, ctx.Err()))
+}
+
+// TestRouterContextCancellationDuringExecution tests cancellation while stages are running.
+func TestRouterContextCancellationDuringExecution(t *testing.T) {
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: makeSimpleStage("A", 50*time.Millisecond, false)}, // Takes longer
+		{Name: "B", Stage: makeSimpleStage("B", 50*time.Millisecond, false)}, // Takes longer
+	}
+	selector := func(_ context.Context, _ string) ([]int, error) {
+		return []int{0, 1}, nil // Select both
+	}
+	router := fluxus.NewRouter(selector, routes...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond) // Timeout shorter than stage duration
+	defer cancel()
+
+	_, err := router.Process(ctx, "input")
+	require.Error(t, err)
+	// The error should indicate cancellation during execution
+	require.ErrorIs(t, err, context.DeadlineExceeded, "Expected context deadline exceeded error")
+	// Check that the error indicates a stage was cancelled due to the deadline
+	assert.Contains(t, err.Error(), "router target stage")                  // Check for the stage-specific wrapping
+	assert.Contains(t, err.Error(), "cancelled: context deadline exceeded") // Check for the cancellation reason
+}
+
+// TestRouterWithConcurrencyLimit tests the concurrency setting.
+func TestRouterWithConcurrencyLimit(t *testing.T) {
+	var runCount atomic.Int32
+	var maxConcurrent atomic.Int32
+	var currentConcurrent atomic.Int32
+	var mu sync.Mutex // To protect maxConcurrent update
+
+	stageFunc := func(id string) fluxus.Stage[string, string] {
+		return fluxus.StageFunc[string, string](func(ctx context.Context, input string) (string, error) {
+			runCount.Add(1)
+			concurrent := currentConcurrent.Add(1)
+
+			mu.Lock()
+			if concurrent > maxConcurrent.Load() {
+				maxConcurrent.Store(concurrent)
+			}
+			mu.Unlock()
+
+			defer currentConcurrent.Add(-1)
+
+			select {
+			case <-time.After(20 * time.Millisecond): // Simulate work
+				return fmt.Sprintf("%s -> %s", input, id), nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		})
+	}
+
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: stageFunc("A")},
+		{Name: "B", Stage: stageFunc("B")},
+		{Name: "C", Stage: stageFunc("C")},
+		{Name: "D", Stage: stageFunc("D")},
+	}
+	selector := func(_ context.Context, _ string) ([]int, error) {
+		return []int{0, 1, 2, 3}, nil // Select all
+	}
+	router := fluxus.NewRouter(selector, routes...).WithConcurrency(2) // Limit to 2
+
+	start := time.Now()
+	output, err := router.Process(context.Background(), "input")
+	duration := time.Since(start)
+
+	require.NoError(t, err)
+	require.Len(t, output, 4)
+	assert.Equal(t, int32(4), runCount.Load(), "All stages should have run")
+	assert.Equal(t, int32(2), maxConcurrent.Load(), "Max concurrency should be limited to 2")
+
+	// With 4 tasks and concurrency 2, duration should be roughly 2 * stage duration
+	assert.True(t, duration > 35*time.Millisecond && duration < 60*time.Millisecond, "Duration %v not consistent with concurrency limit 2", duration)
+}
+
+// TestRouterWithErrorHandler tests the custom error handler.
+func TestRouterWithErrorHandler(t *testing.T) {
+	selectorErr := errors.New("selector failed")
+	stageErr := errors.New("stage B failed") // Predefined error instance
+	customErr := errors.New("custom handler error")
+
+	// Helper stage that can return a specific predefined error
+	makeStageWithError := func(id string, delay time.Duration, failErr error) fluxus.Stage[string, string] {
+		return fluxus.StageFunc[string, string](func(ctx context.Context, input string) (string, error) {
+			select {
+			case <-time.After(delay):
+				if failErr != nil {
+					// Return the exact error instance passed in
+					return "", failErr
+				}
+				return fmt.Sprintf("%s -> %s", input, id), nil
+			case <-ctx.Done():
+				return "", fmt.Errorf("stage %s cancelled: %w", id, ctx.Err())
+			}
+		})
+	}
+
+	routes := []fluxus.Route[string, string]{
+		// Use the new helper for stage B to ensure it returns the specific stageErr instance
+		{Name: "A", Stage: makeStageWithError("A", 0, nil)},      // Succeeds
+		{Name: "B", Stage: makeStageWithError("B", 0, stageErr)}, // Fails with the predefined stageErr
+	}
+
+	selector := func(_ context.Context, item string) ([]int, error) {
+		if item == "selector-fail" {
+			return nil, selectorErr
+		}
+		if item == "stage-fail" {
+			return []int{0, 1}, nil // Select A and B
+		}
+		if item == "no-match" {
+			return nil, nil // No match
+		}
+		return nil, errors.New("unexpected input")
+	}
+
+	handler := func(err error) error {
+		// Now errors.Is(err, stageErr) will correctly identify the error instance
+		if errors.Is(err, selectorErr) || errors.Is(err, stageErr) {
+			return fmt.Errorf("%w: %w", customErr, err) // Wrap specific errors
+		}
+		// Do not wrap ErrNoRouteMatched or context errors
+		return err
+	}
+
+	router := fluxus.NewRouter(selector, routes...).WithErrorHandler(handler)
+
+	// --- Test Case 1: Selector Error ---
+	_, err := router.Process(context.Background(), "selector-fail")
+	require.Error(t, err)
+	require.ErrorIs(t, err, customErr, "Error should be wrapped by custom handler")
+	require.ErrorIs(t, err, selectorErr, "Original selector error should be present")
+
+	// --- Test Case 2: Downstream Stage Error ---
+	_, err = router.Process(context.Background(), "stage-fail")
+	require.Error(t, err)
+	// These assertions should now pass because the handler correctly identifies stageErr
+	require.ErrorIs(t, err, customErr, "Error should be wrapped by custom handler")
+	require.ErrorIs(t, err, stageErr, "Original stage error should be present")
+	assert.Contains(t, err.Error(), "router target stage", "Error context should be preserved")
+
+	// --- Test Case 3: No Route Matched (Should NOT be handled) ---
+	_, err = router.Process(context.Background(), "no-match")
+	require.Error(t, err)
+	require.ErrorIs(t, err, fluxus.ErrNoRouteMatched, "ErrNoRouteMatched should be returned directly")
+	require.NotErrorIs(t, err, customErr, "ErrNoRouteMatched should not be wrapped by the custom handler")
+
+	// --- Test Case 4: Context Error (Should NOT be handled by this specific handler) ---
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = router.Process(ctx, "stage-fail") // Input doesn't matter here
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled, "Context error should be returned directly")
+	require.NotErrorIs(t, err, customErr, "Context error should not be wrapped by the custom handler")
+}
+
+// TestRouterNilSelector tests the default behavior with a nil selector.
+func TestRouterNilSelector(t *testing.T) {
+	routes := []fluxus.Route[string, string]{
+		{Name: "A", Stage: makeSimpleStage("A", 0, false)},
+	}
+	router := fluxus.NewRouter[string, string](nil, routes...) // Pass nil selector
+
+	_, err := router.Process(context.Background(), "input")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, fluxus.ErrNoRouteMatched, "Default nil selector should result in ErrNoRouteMatched")
+}
+
+// --- Benchmarks ---
+
+// BenchmarkRouterOverhead measures the overhead of routing vs direct execution.
+func BenchmarkRouterOverhead(b *testing.B) {
+	baseStage := fluxus.StageFunc[int, string](func(_ context.Context, i int) (string, error) {
+		return strconv.Itoa(i * 2), nil
+	})
+
+	routes := []fluxus.Route[int, string]{
+		{Name: "Double", Stage: baseStage},
+	}
+	// Selector always picks the first (and only) route
+	selector := func(_ context.Context, _ int) ([]int, error) {
+		return []int{0}, nil
+	}
+	router := fluxus.NewRouter(selector, routes...)
+
+	input := 123
+	ctx := context.Background()
+
+	b.Run("DirectStage", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = baseStage.Process(ctx, input)
+		}
+	})
+
+	b.Run("RouterToOneStage", func(b *testing.B) {
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = router.Process(ctx, input)
+		}
+	})
+}
+
+// BenchmarkRouterMultipleRoutes measures performance routing to multiple concurrent stages.
+func BenchmarkRouterMultipleRoutes(b *testing.B) {
+	// Stage with a tiny bit of work to make concurrency measurable
+	workStage := fluxus.StageFunc[int, string](func(_ context.Context, i int) (string, error) {
+		time.Sleep(1 * time.Microsecond) // Simulate tiny work
+		return strconv.Itoa(i), nil
+	})
+
+	numRoutes := 8
+	routes := make([]fluxus.Route[int, string], numRoutes)
+	for i := 0; i < numRoutes; i++ {
+		routes[i] = fluxus.Route[int, string]{Name: fmt.Sprintf("R%d", i), Stage: workStage}
+	}
+
+	// Selector picks all routes
+	allIndices := make([]int, numRoutes)
+	for i := 0; i < numRoutes; i++ {
+		allIndices[i] = i
+	}
+	selector := func(_ context.Context, _ int) ([]int, error) {
+		return allIndices, nil
+	}
+
+	input := 456
+	ctx := context.Background()
+
+	for _, concurrency := range []int{0, 1, 2, 4, 8} { // 0 = unlimited
+		router := fluxus.NewRouter(selector, routes...).WithConcurrency(concurrency)
+		concurrencyLabel := "Unlimited"
+		if concurrency > 0 {
+			concurrencyLabel = strconv.Itoa(concurrency)
+		}
+
+		b.Run(fmt.Sprintf("RouterTo%dStages_Concurrency%s", numRoutes, concurrencyLabel), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				res, err := router.Process(ctx, input)
+				// Add checks to prevent compiler optimizing away the call
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(res) != numRoutes {
+					b.Fatalf("Expected %d results, got %d", numRoutes, len(res))
+				}
+			}
+		})
+	}
 }
