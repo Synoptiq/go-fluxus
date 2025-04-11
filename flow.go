@@ -344,3 +344,87 @@ func (r *Router[I, O]) Process(ctx context.Context, input I) ([]O, error) {
 // Ensure Router implements the Stage interface.
 // Input type I, Output type []O
 var _ Stage[string, []string] = (*Router[string, string])(nil)
+
+// KeyFunc defines the function signature for extracting a comparable key from an item.
+type KeyFunc[I any, K comparable] func(ctx context.Context, item I) (K, error)
+
+// JoinByKey is a stage that groups items from an input slice based on a key
+// extracted from each item. It outputs a map where keys correspond to the
+// extracted keys and values are slices of items sharing that key.
+// This is useful for grouping results after a FanOut or Router stage.
+type JoinByKey[I any, K comparable] struct {
+	keyFunc    KeyFunc[I, K]
+	errHandler func(error) error
+}
+
+// NewJoinByKey creates a new JoinByKey stage.
+// The keyFunc is used to extract a comparable key from each input item.
+func NewJoinByKey[I any, K comparable](keyFunc KeyFunc[I, K]) *JoinByKey[I, K] {
+	if keyFunc == nil {
+		// If keyFunc is nil, it's impossible to join, so we should probably panic
+		// or return an error during construction, but for now, let's make it
+		// fail during Process. A better approach might be to return (nil, error)
+		// from the constructor or enforce non-nil.
+		// For simplicity here, we'll let it fail in Process.
+	}
+	return &JoinByKey[I, K]{
+		keyFunc:    keyFunc,
+		errHandler: func(err error) error { return err }, // Default error handler
+	}
+}
+
+// WithErrorHandler adds a custom error handler to the JoinByKey stage.
+// This handles errors from the keyFunc itself or context cancellation.
+func (j *JoinByKey[I, K]) WithErrorHandler(handler func(error) error) *JoinByKey[I, K] {
+	if handler == nil {
+		handler = func(err error) error { return err } // Reset to default
+	}
+	j.errHandler = handler
+	return j
+}
+
+// Process implements the Stage interface for JoinByKey.
+// It groups items from the input slice into a map based on the extracted key.
+func (j *JoinByKey[I, K]) Process(ctx context.Context, inputs []I) (map[K][]I, error) {
+	// Check context cancellation first
+	if ctx.Err() != nil {
+		// Return nil map on context error
+		return nil, j.errHandler(ctx.Err())
+	}
+
+	if j.keyFunc == nil {
+		// Handle the case where the keyFunc was nil during construction
+		return nil, j.errHandler(errors.New("JoinByKey: keyFunc cannot be nil"))
+	}
+
+	// Initialize the result map
+	// Pre-allocating capacity can be tricky without knowing key distribution,
+	// so we start with a reasonable default or let Go handle it.
+	resultMap := make(map[K][]I)
+
+	// Iterate through the input items
+	for i, item := range inputs {
+		// Check context cancellation within the loop for long inputs
+		if ctx.Err() != nil {
+			return nil, j.errHandler(ctx.Err())
+		}
+
+		// Extract the key for the current item
+		key, err := j.keyFunc(ctx, item)
+		if err != nil {
+			// Error during key extraction
+			wrappedErr := fmt.Errorf("JoinByKey keyFunc error for item at index %d: %w", i, err)
+			return nil, j.errHandler(wrappedErr)
+		}
+
+		// Append the item to the slice associated with the key in the map
+		resultMap[key] = append(resultMap[key], item)
+	}
+
+	// Return the map containing grouped items
+	return resultMap, nil
+}
+
+// Ensure JoinByKey implements the Stage interface.
+// Input type []I, Output type map[K][]I
+var _ Stage[[]string, map[int][]string] = (*JoinByKey[string, int])(nil)
