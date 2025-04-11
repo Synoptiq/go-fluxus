@@ -5,6 +5,19 @@ All notable changes to the Fluxus project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2025-04-11
+
+### Added
+- N/A
+
+### Changed
+- Moved from GPL-3 to MIT license for better compatibility with other projects
+
+### Removed
+- N/A
+
+[1.1.1]: https://github.com/synoptiq/go-fluxus/releases/tag/v1.1.1
+
 ## [1.1.0] - 2025-04-10
 
 ### Added
@@ -14,10 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 ### Changed
-- N/A (initial release)
+- N/A
 
 ### Removed
-- N/A (initial release)
+- N/A
 
 [1.1.0]: https://github.com/synoptiq/go-fluxus/releases/tag/v1.1.0
 

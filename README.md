@@ -1,4 +1,13 @@
 # Fluxus - Go Pipeline Library
+<p align="center">
+<img alt="GitHub license" src="https://img.shields.io/github/license/synoptiq/go-fluxus">
+<img alt="GitHub tag check runs" src="https://img.shields.io/github/check-runs/synoptiq/go-fluxus/v1.1.1">
+<img alt="GitHub Issues or Pull Requests" src="https://img.shields.io/github/issues/synoptiq/go-fluxus">
+<img alt="GitHub repo size" src="https://img.shields.io/github/repo-size/synoptiq/go-fluxus">
+</p>
+
+
+
 
 <p align="center">
   <img src="logo.svg" alt="Fluxus Logo" width="100" height="200">
@@ -451,4 +460,4 @@ See [BENCHMARK.md](BENCHMARK.md) for detailed results.
 
 ## License
 
-GPL-3.0 License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) for details.
