@@ -94,6 +94,8 @@ pipeline.WithErrorHandler(func(err error) error {
 result, err := pipeline.Process(ctx, input)
 ```
 
+## Patterns
+
 ### FanOut
 
 `FanOut` processes an input using multiple stages in parallel and collects the results.
@@ -142,7 +144,7 @@ parallel := fluxus.Parallel[Input, Result, Output](
 result, err := parallel.Process(ctx, input)
 ```
 
-### Map (New!)
+### Map
 
 `Map` applies a single `Stage[I, O]` concurrently to each element of an input slice `[]I`, producing an output slice `[]O`. This is useful for parallelizing the same operation across multiple data items.
 
@@ -166,6 +168,93 @@ results, err := mapStage.Process(ctx, inputSlice)
 // and results will contain successes and zero values for errors.
 // If WithCollectErrors(false) (default), err is the first error encountered
 // and results will be nil.
+```
+
+### Buffer
+
+`Buffer` collects items and processes them in batches. This is useful for optimizing operations that are more efficient when performed on multiple items at once (e.g., bulk database inserts).
+ - Takes a `batchSize` and a `processor func(ctx context.Context, batch []I) ([]O, error)`.
+ - The processor function receives a slice of buffered items (`batch`) when the buffer reaches `batchSize` or when the input stream ends.
+ - It returns a slice of results (`[]O`) corresponding to the processed batch.
+
+```go
+// Example: Process integers in batches of 10
+batchProcessor := fluxus.NewBuffer[int, string](10,
+    func(ctx context.Context, batch []int) ([]string, error) {
+        results := make([]string, len(batch))
+        log.Printf("Processing batch of %d items", len(batch))
+        for i, item := range batch {
+            // Simulate processing
+            results[i] = fmt.Sprintf("processed:%d", item)
+            // Check context if processing is long
+            if ctx.Err() != nil {
+                return nil, ctx.Err()
+            }
+        }
+        return results, nil
+    },
+)
+
+// Assume 'inputItems' is a slice of integers []int{1, 2, ..., 25}
+// The processor func will be called 3 times:
+// 1. batch = {1..10}
+// 2. batch = {11..20}
+// 3. batch = {21..25}
+allResults, err := batchProcessor.Process(ctx, inputItems)
+// allResults will be []string{"processed:1", ..., "processed:25"}
+```
+
+### MapReduce
+
+`MapReduce` implements the classic MapReduce pattern for distributed data processing, adapted for in-process pipelines.
+
+ - Takes a `MapperFunc` and a `ReducerFunc`.
+ - *Map Phase*: The `MapperFunc[I, K, V]` processes each input item I and emits an intermediate key-value pair `KeyValue[K, V]`. This phase can run in parallel using `WithParallelism(n)`.
+ - *Shuffle Phase*: Intermediate key-value pairs are automatically grouped by key `K`.
+ - *Reduce Phase*: The `ReducerFunc[K, V, R]` processes each unique key `K` along with all its associated values `[]V` (as `ReduceInput[K, V]`) and produces a final result `R`.
+ - The final output of the `MapReduce` stage is a slice `[]R` containing the results from all reducers.
+
+```go
+// Example: Word Count
+type WordCountResult struct {
+    Word  string
+    Count int
+}
+
+// Mapper: Emits (word, 1) for each word in a line
+mapper := func(ctx context.Context, line string) (fluxus.KeyValue[string, int], error) {
+    // In a real scenario, split line into words properly
+    // For simplicity, assume line is a single word here
+    word := strings.ToLower(strings.TrimSpace(line))
+    if word == "" {
+        // Skip empty lines/words - return zero value and nil error
+        return fluxus.KeyValue[string, int]{}, nil
+    }
+    // Emit word and count 1
+    return fluxus.KeyValue[string, int]{Key: word, Value: 1}, nil
+}
+
+// Reducer: Sums counts for each word
+reducer := func(ctx context.Context, input fluxus.ReduceInput[string, int]) (WordCountResult, error) {
+    sum := 0
+    for _, count := range input.Values {
+        sum += count
+    }
+    return WordCountResult{Word: input.Key, Count: sum}, nil
+}
+
+// Create the MapReduce stage
+mapReduceStage := fluxus.NewMapReduce(mapper, reducer).
+    WithParallelism(runtime.NumCPU()) // Parallelize the map phase
+
+// Input data (e.g., lines from a file)
+lines := []string{"hello world", "hello fluxus", "fluxus example"}
+
+// Process the lines
+// output is []WordCountResult
+output, err := mapReduceStage.Process(ctx, lines)
+// Example output (order not guaranteed):
+// [ {Word:"hello", Count:2}, {Word:"world", Count:1}, {Word:"fluxus", Count:2}, {Word:"example", Count:1} ]
 ```
 
 ## Flow Control
@@ -255,11 +344,14 @@ outputMap, err := joiner.Process(ctx, results)
 // }
 ```
 
-## Advanced Features
+## Resiliency
 
 ### Circuit Breaker
 
 Circuit breaker prevents cascading failures by automatically stopping calls to a failing service.
+ - Takes a `Stage` to protect, a failure threshold, and a reset timeout.
+ - If the failure threshold is reached, the circuit opens and all calls to the stage will fail immediately until the reset timeout expires.
+ - After the reset timeout, the circuit enters a half-open state where a limited number of requests are allowed to test if the service has recovered.
 
 ```go
 // Create a circuit breaker that will open after 5 failures
@@ -279,22 +371,83 @@ result, err := circuitBreaker.Process(ctx, input)
 
 ### Retry with Backoff
 
-```go
-// Create a stage that retries on failure
-retry := fluxus.NewRetry(stage, 3)  // 3 attempts
+The `Retry` stage automatically retries a failed stage up to a specified number of times, with an optional backoff strategy between attempts.
+ - Takes a `Stage` to wrap and the maximum total number of attempts (initial + retries).
+ - You can customize the backoff strategy (e.g., exponential, constant) using `WithBackoff`.
+ - You can specify which errors should trigger a retry using `WithShouldRetry`.
 
-// Add custom backoff strategy (exponential backoff)
-retry.WithBackoff(func(attempt int) int {
-    return 100 * (1 << attempt)  // 100, 200, 400 ms
+```go
+// Create a stage that retries on failure, making up to 3 total attempts
+retry := fluxus.NewRetry(stage, 3)
+
+// Add custom backoff strategy (exponential backoff: 100ms, 200ms delay)
+retry.WithBackoff(func(attempt int) int { // attempt is 0-based index of the *retry*
+    return 100 * (1 << attempt)
 })
 
-// Only retry specific errors
+// Only retry specific errors (e.g., temporary network issues)
 retry.WithShouldRetry(func(err error) bool {
+    // Replace io.ErrTemporary with your actual retryable error check
     return errors.Is(err, io.ErrTemporary)
 })
 ```
 
+### Timeout
+
+The `Timeout` stage wraps another stage to limit its execution time. If the wrapped stage does not complete within the specified duration, its context is cancelled, and the `Timeout` stage typically returns a `TimeoutError`.
+ - Takes a `Stage` to wrap and a `time.Duration` for the timeout.
+
+```go
+// Create a stage that will time out after 5 seconds
+timeoutStage := fluxus.NewTimeout(stage, 5*time.Second)
+
+// Process input with the timeout applied
+result, err := timeoutStage.Process(ctx, input)
+// If timeout occurs, err will likely be *fluxus.TimeoutError
+```
+
+### Dead Letter Queue (DLQ)
+
+`DeadLetterQueue` wraps another stage to capture items that consistently fail processing, even after potential retries. It sends these problematic items and their associated errors to a configured `DLQHandler` for logging, inspection, or later reprocessing, preventing them from blocking the main pipeline flow indefinitely.
+
+ - Wraps an existing `Stage[I, O]`.
+ - Takes a `DLQHandler[I]` implementation via `WithDLQHandler`.
+ - Uses a `shouldDLQ func(error) bool` predicate (configurable via `WithShouldDLQ`) to determine which errors trigger the DLQ (by default, excludes context errors, `ErrCircuitOpen`, `ErrItemFiltered`, etc.).
+ - Logs errors occurring within the `DLQHandler` itself (configurable via `WithDLQErrorLogger`).
+ - The original error from the wrapped stage is always returned by the `DeadLetterQueue` stage's `Process` method.
+
+```go
+// Example: Log failed strings to a DLQ after retries
+flakyStage := fluxus.StageFunc[string, string](/* ... might fail ... */)
+retryStage := fluxus.NewRetry(flakyStage, 3) // Retry 3 times
+
+// Simple DLQ handler that logs the failure
+loggingDLQ := fluxus.DLQHandlerFunc[string](func(ctx context.Context, item string, processingError error) error {
+    log.Printf("[DLQ] Item: %q failed permanently with error: %v", item, processingError)
+    return nil // Indicate DLQ handling succeeded
+})
+
+// Wrap the retry stage with the DLQ
+dlqEnabledStage := fluxus.NewDeadLetterQueue(
+    retryStage, // Wrap the stage *after* retries
+    fluxus.WithDLQHandler[string, string](loggingDLQ),
+)
+
+// Process an item that will eventually fail all retries
+_, err := dlqEnabledStage.Process(ctx, "input-that-fails")
+// err will be the error from retryStage (e.g., RetryExhaustedError)
+// The DLQ handler will have logged the failure details.
+```
+
+## Advanced Features
+
 ### Rate Limiting
+
+`RateLimiter` wraps a stage to control the rate at which it processes items. It uses a token bucket algorithm to enforce limits on requests per second and burst capacity, preventing downstream services from being overwhelmed.
+
+ - Takes a `Stage` to wrap, a `rate.Limit` (requests per second), and a burst size.
+ - Can be configured with a `WithLimiterTimeout` to fail fast if waiting for a token takes too long.
+ - Limits can be adjusted dynamically after creation using `SetLimit` and `SetBurst`.
 
 ```go
 // Create a rate limiter with 10 requests per second and burst of 5
@@ -310,24 +463,13 @@ limiter.SetLimit(rate.Limit(5))  // Change to 5 requests/second
 limiter.SetBurst(10)             // Change burst to 10
 ```
 
-### Timeout
-
-```go
-// Create a stage with a timeout
-timeout := fluxus.NewTimeout(stage, 5*time.Second)
-```
-
-### Buffer for Batch Processing
-
-```go
-// Create a buffer that processes items in batches of 10
-buffer := fluxus.NewBuffer[Item, Result](10, func(ctx context.Context, batch []Item) ([]Result, error) {
-    // Process batch
-    return results, nil
-})
-```
-
 ### Memory Pooling
+
+Fluxus provides utilities for memory pooling to reduce garbage collection pressure in high-throughput scenarios by reusing objects and slices.
+
+ - `NewObjectPool[T]` creates a pool for custom objects using a factory function. Objects are retrieved with `Get()` and returned with `Put()`.
+ - `NewSlicePool[T]` creates a pool specifically for slices, allowing efficient reuse. Slices can be retrieved with `Get()` or `GetWithCapacity()`.
+ - Pools can be configured with names and capacities and can be pre-warmed using `PreWarmPool`.
 
 ```go
 // Create a memory pool for reducing allocations
@@ -355,6 +497,11 @@ slice := slicePool.GetWithCapacity(20)
 
 ### Optimized Pooled Buffer
 
+`PooledBuffer` is a specialized, high-performance version of `Buffer` that integrates with the memory pooling system. It reuses internal batch slices, further reducing allocations during batch processing, making it suitable for performance-critical applications handling large volumes of data.
+
+ - Takes a `batchSize` and a processor `func(ctx context.Context, batch []I) ([]O, error)`.
+ - Automatically uses slice pooling for its internal buffers
+
 ```go
 // Create a high-performance buffer with object pooling
 pooledBuffer := fluxus.NewPooledBuffer[Item, Result](
@@ -367,7 +514,15 @@ pooledBuffer := fluxus.NewPooledBuffer[Item, Result](
 )
 ```
 
+## Metrics and Tracing
+
 ### Metrics Collection
+
+Fluxus allows integrating custom metrics collection to monitor pipeline performance and behavior.
+
+ - Define a type that implements the `MetricsCollector` interface (e.g., for Prometheus, StatsD).
+ - Wrap stages with `NewMetricatedStage`, providing a stage name (`WithStageName`) and optionally a specific collector instance (`WithMetricsCollector`). If no collector is specified, it uses `fluxus.DefaultMetricsCollector`.
+ - The collector receives callbacks for events like stage start, end, success, and failure.
 
 ```go
 // Implement the MetricsCollector interface for your metrics system
@@ -392,6 +547,12 @@ metricated := fluxus.NewMetricatedStage(
 ```
 
 ### OpenTelemetry Tracing
+
+Built-in support for distributed tracing using OpenTelemetry allows you to visualize request flows across your pipeline and potentially other services.
+
+ - Wrap stages with `NewTracedStage`, providing a tracer name (`WithTracerName`) and optional attributes (`WithTracerAttributes`). It uses the globally configured OpenTelemetry tracer provider.
+ - Specialized wrappers like `NewTracedFanOut` provide more context for specific patterns.
+ - Spans are automatically created for stage execution, capturing duration and errors.
 
 ```go
 // Create a traced stage
@@ -433,6 +594,8 @@ pipeline := fluxus.NewPipeline(processStage)
 
 ### Use Context for Cancellation
 
+Use `context.Context` to manage cancellation and timeouts effectively:
+
 ```go
 ctx, cancel := context.WithCancel(context.Background())
 defer cancel()
@@ -440,6 +603,8 @@ result, err := pipeline.Process(ctx, input)
 ```
 
 ### Handle Errors Appropriately
+
+Use custom error handlers to manage errors in a pipeline gracefully:
 
 ```go
 pipeline.WithErrorHandler(func(err error) error {
@@ -453,11 +618,15 @@ pipeline.WithErrorHandler(func(err error) error {
 
 ### Control Resource Usage
 
+Use `WithConcurrency()` to limit the number of concurrent executions in a stage or pipeline. This is especially important for I/O-bound tasks to avoid overwhelming resources:
+
 ```go
 fanOut.WithConcurrency(runtime.NumCPU())  // Limit concurrency to CPU count
 ```
 
 ### Use Generics for Type Safety
+
+Use generics to create type-safe stages and pipelines. This ensures that the input and output types are consistent throughout the pipeline:
 
 ```go
 stage := fluxus.StageFunc[CustomInput, CustomOutput](func(ctx context.Context, input CustomInput) (CustomOutput, error) {
@@ -485,6 +654,8 @@ pipeline := fluxus.NewPipeline(traced)
 
 ### Pre-warm Pools for Performance
 
+Pre-warm object pools to reduce the overhead of creating new objects during high-load periods. This is especially useful for frequently created objects in performance-critical applications.
+
 ```go
 // Create the pool
 pool := fluxus.NewObjectPool(/* ... */)
@@ -497,12 +668,16 @@ fluxus.PreWarmPool(pool, 100)
 
 Fluxus provides specialized error types for different scenarios:
 
-- `StageError`: Identifies which specific stage in a pipeline failed
-- `FanOutError`: Contains errors from multiple failed stages in fan-out
-- `RetryExhaustedError`: Indicates all retry attempts were exhausted
-- `TimeoutError`: Indicates a stage timed out
-- `BufferError`: Provides details about batch processing failures
-- `ErrCircuitOpen`: Indicates a circuit breaker is open
+- `StageError`: Identifies which specific stage in a pipeline failed.
+- `FanOutError`: Contains errors from multiple failed stages in fan-out.
+- `MultiError`: Wraps multiple errors, often returned by `Map` when `WithCollectErrors(true)` is used.
+- `RetryExhaustedError`: Indicates all retry attempts were exhausted.
+- `TimeoutError`: Indicates a stage timed out.
+- `BufferError`: Provides details about batch processing failures.
+- `ErrCircuitOpen`: Indicates a circuit breaker is open and rejecting requests.
+- `ErrItemFiltered`: Returned by `Filter` when an item does not meet the predicate criteria.
+- `ErrNoRouteMatched`: Returned by `Router` when the selector function doesn't match any configured routes.
+- `RateLimitWaitError`: Returned by `RateLimiter` if waiting for a token exceeds the configured timeout (`WithLimiterTimeout`).
 
 ## Performance Benchmarks
 
@@ -544,6 +719,36 @@ See [BENCHMARK.md](BENCHMARK.md) for detailed results.
 9. **Metrics & Tracing**: In production environments, the overhead of metrics and tracing is usually negligible compared to their benefits, but use the noop implementations in performance-critical paths if needed.
 
 10. **Memory Management**: For large data processing, consider using the `PooledBuffer` to reduce allocations.
+
+
+## Use Cases
+
+Fluxus is well-suited for a variety of data processing and orchestration tasks, including:
+
+-   **ETL Pipelines:** Extracting data from various sources, transforming it concurrently, and loading it into destinations.
+-   **Real-time Data Processing:** Handling streams of data, applying filters, aggregations, and enrichments in sequence or parallel.
+-   **API Aggregation & Orchestration:** Calling multiple downstream APIs concurrently, processing their responses, and aggregating results.
+-   **Background Job Processing:** Building robust workers that process jobs from a queue with retries, timeouts, and error handling.
+-   **Image/Video Processing:** Creating pipelines to resize, encode, or analyze media files in parallel.
+-   **Complex Workflows:** Implementing multi-step business logic with conditional routing and fault tolerance.
+
+
+## Contributing
+
+Contributions are welcome! Whether it's reporting a bug, suggesting a feature, or submitting code, your help is appreciated.
+
+**Reporting Issues:**
+-   Use the GitHub Issues tracker to report bugs or suggest enhancements.
+-   Please provide clear steps to reproduce the issue or a detailed description of the feature request.
+
+**Pull Requests:**
+-   Fork the repository and create a new branch for your changes.
+-   Ensure your code adheres to Go best practices and includes relevant tests.
+-   Run `go fmt` and `go vet` before submitting.
+-   Keep pull requests focused on a single issue or feature.
+-   Provide a clear description of the changes in your pull request.
+
+We aim to review contributions promptly. Thank you for helping improve Fluxus!
 
 ## License
 
