@@ -8,32 +8,49 @@ import (
 // MetricsCollector defines an interface for collecting metrics about pipeline operations.
 // This allows for integration with various monitoring systems like Prometheus, StatsD, etc.
 type MetricsCollector interface {
-	// StageStarted is called when a stage begins processing.
+	// --- General Stage Metrics (Apply to both Pipeline and StreamPipeline stages) ---
+
+	// StageStarted is called when a stage's Process method begins execution.
 	StageStarted(ctx context.Context, stageName string)
-
-	// StageCompleted is called when a stage successfully completes processing.
+	// StageCompleted is called when a stage's Process method completes successfully.
 	StageCompleted(ctx context.Context, stageName string, duration time.Duration)
-
-	// StageError is called when a stage encounters an error.
+	// StageError is called when a stage's Process method returns an error.
 	StageError(ctx context.Context, stageName string, err error)
 
-	// RetryAttempt is called for each retry attempt.
+	// --- Specific Stage Type Metrics (Apply wherever these stage types are used) ---
+
+	// RetryAttempt is called for each retry attempt within a Retry stage.
 	RetryAttempt(ctx context.Context, stageName string, attempt int, err error)
-
-	// BufferBatchProcessed is called when a batch is processed in a buffer.
+	// BufferBatchProcessed is called when a batch is processed by a Buffer stage.
 	BufferBatchProcessed(ctx context.Context, batchSize int, duration time.Duration)
+	// FanOutStarted is called when a FanOut stage begins processing.
+	FanOutStarted(ctx context.Context, stageName string, numBranches int) // Added stageName
+	// FanOutCompleted is called when a FanOut stage completes processing.
+	FanOutCompleted(ctx context.Context, stageName string, numBranches int, duration time.Duration) // Added stageName
+	// FanInStarted is called when a FanIn stage begins processing.
+	FanInStarted(ctx context.Context, stageName string, numInputs int) // Added stageName
+	// FanInCompleted is called when a FanIn stage completes processing.
+	FanInCompleted(ctx context.Context, stageName string, numInputs int, duration time.Duration) // Added stageName
 
-	// FanOutStarted is called when a fan-out operation begins.
-	FanOutStarted(ctx context.Context, numStages int)
+	// --- Stream Pipeline Lifecycle Metrics ---
 
-	// FanOutCompleted is called when a fan-out operation completes.
-	FanOutCompleted(ctx context.Context, numStages int, duration time.Duration)
+	// PipelineStarted is called when a StreamPipeline's Run method begins execution.
+	// (Could optionally be called by simple Pipeline.Process too).
+	PipelineStarted(ctx context.Context, pipelineName string) // Added
+	// PipelineCompleted is called when a StreamPipeline's Run method finishes.
+	// (Could optionally be called by simple Pipeline.Process too).
+	PipelineCompleted(ctx context.Context, pipelineName string, duration time.Duration, err error) // Added
 
-	// FanInStarted is called when a fan-in operation begins.
-	FanInStarted(ctx context.Context, numInputs int)
+	// --- Stream Worker Metrics (Specific to how stages run within StreamPipeline) ---
 
-	// FanInCompleted is called when a fan-in operation completes.
-	FanInCompleted(ctx context.Context, numInputs int, duration time.Duration)
+	// StageWorkerConcurrency reports the configured concurrency for a stage within the stream.
+	StageWorkerConcurrency(ctx context.Context, stageName string, concurrencyLevel int) // Added (Renamed from Adapter*)
+	// StageWorkerItemProcessed reports successful processing of an item by a stream worker.
+	StageWorkerItemProcessed(ctx context.Context, stageName string, duration time.Duration) // Added (Renamed from Adapter*)
+	// StageWorkerItemSkipped reports an item skipped due to an error with SkipOnError strategy.
+	StageWorkerItemSkipped(ctx context.Context, stageName string, err error) // Added (Renamed from Adapter*)
+	// StageWorkerErrorSent reports an error sent to an error channel via SendToErrorChannel strategy.
+	StageWorkerErrorSent(ctx context.Context, stageName string, err error) // Added (Renamed from Adapter*)
 }
 
 // NoopMetricsCollector is a metrics collector that does nothing.
@@ -43,40 +60,142 @@ type NoopMetricsCollector struct{}
 // Ensure NoopMetricsCollector implements MetricsCollector
 var _ MetricsCollector = (*NoopMetricsCollector)(nil)
 
-// StageStarted implements MetricsCollector.
+// StageStarted implements MetricsCollector interface for NoopMetricsCollector.
 func (*NoopMetricsCollector) StageStarted(_ context.Context, _ string) {}
 
-// StageCompleted implements MetricsCollector.
-func (*NoopMetricsCollector) StageCompleted(_ context.Context, _ string, _ time.Duration) {
-}
+// StageCompleted implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) StageCompleted(_ context.Context, _ string, _ time.Duration) {}
 
-// StageError implements MetricsCollector.
+// StageError implements MetricsCollector interface for NoopMetricsCollector.
 func (*NoopMetricsCollector) StageError(_ context.Context, _ string, _ error) {}
 
-// RetryAttempt implements MetricsCollector.
-func (*NoopMetricsCollector) RetryAttempt(_ context.Context, _ string, _ int, _ error) {
+// RetryAttempt implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) RetryAttempt(_ context.Context, _ string, _ int, _ error) {}
+
+// BufferBatchProcessed implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) BufferBatchProcessed(_ context.Context, _ int, _ time.Duration) {}
+
+// FanOutStarted implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) FanOutStarted(_ context.Context, _ string, _ int) {}
+
+// FanOutCompleted implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) FanOutCompleted(_ context.Context, _ string, _ int, _ time.Duration) {}
+
+// FanInStarted implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) FanInStarted(_ context.Context, _ string, _ int) {}
+
+// FanInCompleted implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) FanInCompleted(_ context.Context, _ string, _ int, _ time.Duration) {}
+
+// PipelineStarted implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) PipelineStarted(_ context.Context, _ string) {}
+
+// PipelineCompleted implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) PipelineCompleted(_ context.Context, _ string, _ time.Duration, _ error) {
 }
 
-// BufferBatchProcessed implements MetricsCollector.
-func (*NoopMetricsCollector) BufferBatchProcessed(_ context.Context, _ int, _ time.Duration) {
-}
+// StageWorkerConcurrency implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) StageWorkerConcurrency(_ context.Context, _ string, _ int) {}
 
-// FanOutStarted implements MetricsCollector.
-func (*NoopMetricsCollector) FanOutStarted(_ context.Context, _ int) {}
+// StageWorkerItemProcessed implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) StageWorkerItemProcessed(_ context.Context, _ string, _ time.Duration) {}
 
-// FanOutCompleted implements MetricsCollector.
-func (*NoopMetricsCollector) FanOutCompleted(_ context.Context, _ int, _ time.Duration) {
-}
+// StageWorkerItemSkipped implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) StageWorkerItemSkipped(_ context.Context, _ string, _ error) {}
 
-// FanInStarted implements MetricsCollector.
-func (*NoopMetricsCollector) FanInStarted(_ context.Context, _ int) {}
-
-// FanInCompleted implements MetricsCollector.
-func (*NoopMetricsCollector) FanInCompleted(_ context.Context, _ int, _ time.Duration) {
-}
+// StageWorkerErrorSent implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) StageWorkerErrorSent(_ context.Context, _ string, _ error) {}
 
 // DefaultMetricsCollector is the default metrics collector used when none is provided.
 var DefaultMetricsCollector MetricsCollector = &NoopMetricsCollector{}
+
+// MetricatedPipeline wraps a standard Pipeline with metrics collection.
+type MetricatedPipeline[I, O any] struct {
+	// The underlying pipeline
+	pipeline *Pipeline[I, O] // Embed or hold the original pipeline
+
+	// Name for metrics and logging
+	name string
+
+	// Metrics collector
+	metricsCollector MetricsCollector
+}
+
+// MetricatedPipelineOption is a function that configures a MetricatedPipeline.
+type MetricatedPipelineOption[I, O any] func(*MetricatedPipeline[I, O])
+
+// WithPipelineMetricsCollector adds a metrics collector to the metricated pipeline.
+func WithPipelineMetricsCollector[I, O any](collector MetricsCollector) MetricatedPipelineOption[I, O] {
+	return func(mp *MetricatedPipeline[I, O]) {
+		if collector != nil {
+			mp.metricsCollector = collector
+		}
+	}
+}
+
+// WithPipelineName adds a name to the metricated pipeline for metrics and logging.
+func WithPipelineName[I, O any](name string) MetricatedPipelineOption[I, O] {
+	return func(mp *MetricatedPipeline[I, O]) {
+		if name != "" {
+			mp.name = name
+		}
+	}
+}
+
+// NewMetricatedPipeline creates a new metricated pipeline that wraps an existing Pipeline.
+func NewMetricatedPipeline[I, O any](
+	pipeline *Pipeline[I, O],
+	options ...MetricatedPipelineOption[I, O],
+) *MetricatedPipeline[I, O] {
+	if pipeline == nil {
+		panic("fluxus.NewMetricatedPipeline: pipeline cannot be nil")
+	}
+
+	mp := &MetricatedPipeline[I, O]{
+		pipeline:         pipeline,
+		name:             "metricated_pipeline",   // Default name
+		metricsCollector: DefaultMetricsCollector, // Default collector
+	}
+
+	// Apply options
+	for _, option := range options {
+		option(mp)
+	}
+
+	return mp
+}
+
+// Process implements the core processing logic for the metricated pipeline,
+// adding metrics calls around the underlying pipeline's Process method.
+func (mp *MetricatedPipeline[I, O]) Process(ctx context.Context, input I) (O, error) {
+	// Track starting time for metrics
+	startTime := time.Now()
+	var zero O // Zero value for error returns
+
+	// Signal pipeline start
+	mp.metricsCollector.PipelineStarted(ctx, mp.name)
+
+	// Process the request using the underlying pipeline
+	output, err := mp.pipeline.Process(ctx, input)
+
+	// Record pipeline completion metrics
+	duration := time.Since(startTime)
+	mp.metricsCollector.PipelineCompleted(ctx, mp.name, duration, err)
+
+	// Return the result from the underlying pipeline
+	// Note: The underlying pipeline already applied its error handler if configured.
+	if err != nil {
+		return zero, err // Return zero value for O on error
+	}
+	return output, nil
+}
+
+// WithErrorHandler delegates to the underlying pipeline's WithErrorHandler.
+// It returns the MetricatedPipeline for chaining.
+func (mp *MetricatedPipeline[I, O]) WithErrorHandler(handler func(error) error) *MetricatedPipeline[I, O] {
+	mp.pipeline.WithErrorHandler(handler) // Modify the underlying pipeline
+	return mp
+}
 
 // MetricatedStage wraps any Stage with metrics collection
 type MetricatedStage[I, O any] struct {
@@ -151,8 +270,6 @@ func (ms *MetricatedStage[I, O]) Process(ctx context.Context, input I) (O, error
 	return output, err
 }
 
-// Factory functions for creating metricated versions of specific stages
-
 // MetricatedFanOutStage wraps a FanOut with additional fan-out specific metrics
 type MetricatedFanOutStage[I, O any] struct {
 	stage            *FanOut[I, O]
@@ -193,7 +310,7 @@ func (ms *MetricatedFanOutStage[I, O]) Process(ctx context.Context, input I) ([]
 	// Signal stage start
 	if ms.metricsCollector != nil {
 		ms.metricsCollector.StageStarted(ctx, ms.name)
-		ms.metricsCollector.FanOutStarted(ctx, len(ms.stage.stages))
+		ms.metricsCollector.FanOutStarted(ctx, ms.name, len(ms.stage.stages))
 	}
 
 	// Process the request using the underlying stage
@@ -206,7 +323,7 @@ func (ms *MetricatedFanOutStage[I, O]) Process(ctx context.Context, input I) ([]
 		} else {
 			duration := time.Since(startTime)
 			ms.metricsCollector.StageCompleted(ctx, ms.name, duration)
-			ms.metricsCollector.FanOutCompleted(ctx, len(ms.stage.stages), duration)
+			ms.metricsCollector.FanOutCompleted(ctx, ms.name, len(ms.stage.stages), duration)
 		}
 	}
 
@@ -253,7 +370,7 @@ func (ms *MetricatedFanInStage[I, O]) Process(ctx context.Context, inputs []I) (
 	// Signal stage start
 	if ms.metricsCollector != nil {
 		ms.metricsCollector.StageStarted(ctx, ms.name)
-		ms.metricsCollector.FanInStarted(ctx, len(inputs))
+		ms.metricsCollector.FanInStarted(ctx, ms.name, len(inputs))
 	}
 
 	// Process the request using the underlying stage
@@ -266,7 +383,7 @@ func (ms *MetricatedFanInStage[I, O]) Process(ctx context.Context, inputs []I) (
 		} else {
 			duration := time.Since(startTime)
 			ms.metricsCollector.StageCompleted(ctx, ms.name, duration)
-			ms.metricsCollector.FanInCompleted(ctx, len(inputs), duration)
+			ms.metricsCollector.FanInCompleted(ctx, ms.name, len(inputs), duration)
 		}
 	}
 
