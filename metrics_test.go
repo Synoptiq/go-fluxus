@@ -14,15 +14,45 @@ import (
 
 // mockMetricsCollector records metrics for testing
 type mockMetricsCollector struct {
-	stageStarted      int64
-	stageCompleted    int64
-	stageErrors       int64
-	retryAttempts     int64
-	fanOutStarted     int64
-	fanOutCompleted   int64
-	fanInStarted      int64
-	fanInCompleted    int64
-	bufferBatchCalled int64
+	stageStarted             int64
+	stageCompleted           int64
+	stageErrors              int64
+	retryAttempts            int64
+	bufferBatchCalled        int64
+	fanOutStarted            int64
+	fanOutCompleted          int64
+	fanInStarted             int64
+	fanInCompleted           int64
+	pipelineStarted          int64 // Added
+	pipelineCompleted        int64 // Added
+	stageWorkerConcurrency   int64 // Added
+	stageWorkerItemProcessed int64 // Added
+	stageWorkerItemSkipped   int64 // Added
+	stageWorkerErrorSent     int64 // Added
+}
+
+func (m *mockMetricsCollector) PipelineStarted(_ context.Context, _ string) {
+	atomic.AddInt64(&m.pipelineStarted, 1)
+}
+
+func (m *mockMetricsCollector) PipelineCompleted(_ context.Context, _ string, _ time.Duration, _ error) {
+	atomic.AddInt64(&m.pipelineCompleted, 1)
+}
+
+func (m *mockMetricsCollector) StageWorkerConcurrency(_ context.Context, _ string, _ int) {
+	atomic.AddInt64(&m.stageWorkerConcurrency, 1)
+}
+
+func (m *mockMetricsCollector) StageWorkerItemProcessed(_ context.Context, _ string, _ time.Duration) {
+	atomic.AddInt64(&m.stageWorkerItemProcessed, 1)
+}
+
+func (m *mockMetricsCollector) StageWorkerItemSkipped(_ context.Context, _ string, _ error) {
+	atomic.AddInt64(&m.stageWorkerItemSkipped, 1)
+}
+
+func (m *mockMetricsCollector) StageWorkerErrorSent(_ context.Context, _ string, _ error) {
+	atomic.AddInt64(&m.stageWorkerErrorSent, 1)
 }
 
 func (m *mockMetricsCollector) StageStarted(_ context.Context, _ string) {
@@ -45,19 +75,19 @@ func (m *mockMetricsCollector) BufferBatchProcessed(_ context.Context, _ int, _ 
 	atomic.AddInt64(&m.bufferBatchCalled, 1)
 }
 
-func (m *mockMetricsCollector) FanOutStarted(_ context.Context, _ int) {
+func (m *mockMetricsCollector) FanOutStarted(_ context.Context, _ string, _ int) {
 	atomic.AddInt64(&m.fanOutStarted, 1)
 }
 
-func (m *mockMetricsCollector) FanOutCompleted(_ context.Context, _ int, _ time.Duration) {
+func (m *mockMetricsCollector) FanOutCompleted(_ context.Context, _ string, _ int, _ time.Duration) {
 	atomic.AddInt64(&m.fanOutCompleted, 1)
 }
 
-func (m *mockMetricsCollector) FanInStarted(_ context.Context, _ int) {
+func (m *mockMetricsCollector) FanInStarted(_ context.Context, _ string, _ int) {
 	atomic.AddInt64(&m.fanInStarted, 1)
 }
 
-func (m *mockMetricsCollector) FanInCompleted(_ context.Context, _ int, _ time.Duration) {
+func (m *mockMetricsCollector) FanInCompleted(_ context.Context, _ string, _ int, _ time.Duration) {
 	atomic.AddInt64(&m.fanInCompleted, 1)
 }
 
