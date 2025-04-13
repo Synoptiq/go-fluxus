@@ -28,6 +28,13 @@ type InMemoryMetricsCollector struct {
 	fanInCompletedCount  int64
 	bufferBatchCount     int64
 
+	pipelineStartedCount          int64 // Added
+	pipelineCompletedCount        int64 // Added
+	stageWorkerConcurrencyCount   int64 // Added
+	stageWorkerItemProcessedCount int64 // Added
+	stageWorkerItemSkippedCount   int64 // Added
+	stageWorkerErrorSentCount     int64 // Added
+
 	// Store durations (use mutex for slice access)
 	stageDurations map[string][]time.Duration
 	mu             sync.Mutex
@@ -68,30 +75,62 @@ func (m *InMemoryMetricsCollector) BufferBatchProcessed(ctx context.Context, bat
 	fmt.Printf("  📊 Metric: Buffer batch processed (size %d) in %v\n", batchSize, duration)
 }
 
-func (m *InMemoryMetricsCollector) FanOutStarted(ctx context.Context, numStages int) {
+func (m *InMemoryMetricsCollector) FanOutStarted(ctx context.Context, stageName string, numStages int) {
 	atomic.AddInt64(&m.fanOutStartedCount, 1)
-	fmt.Printf("  📊 Metric: FanOut started (%d stages)\n", numStages)
+	fmt.Printf("  📊 Metric: FanOut[%s] started (%d stages)\n", stageName, numStages)
 }
 
-func (m *InMemoryMetricsCollector) FanOutCompleted(ctx context.Context, numStages int, duration time.Duration) {
+func (m *InMemoryMetricsCollector) FanOutCompleted(ctx context.Context, stageName string, numStages int, duration time.Duration) {
 	atomic.AddInt64(&m.fanOutCompletedCount, 1)
-	fmt.Printf("  📊 Metric: FanOut completed (%d stages) in %v\n", numStages, duration)
+	fmt.Printf("  📊 Metric: FanOut[%s] completed (%d stages) in %v\n", stageName, numStages, duration)
 }
 
-func (m *InMemoryMetricsCollector) FanInStarted(ctx context.Context, numInputs int) {
+func (m *InMemoryMetricsCollector) FanInStarted(ctx context.Context, stageName string, numInputs int) {
 	atomic.AddInt64(&m.fanInStartedCount, 1)
-	fmt.Printf("  📊 Metric: FanIn started (%d inputs)\n", numInputs)
+	fmt.Printf("  📊 Metric: FanIn[%s] started (%d inputs)\n", stageName, numInputs)
 }
 
-func (m *InMemoryMetricsCollector) FanInCompleted(ctx context.Context, numInputs int, duration time.Duration) {
+func (m *InMemoryMetricsCollector) FanInCompleted(ctx context.Context, stageName string, numInputs int, duration time.Duration) {
 	atomic.AddInt64(&m.fanInCompletedCount, 1)
-	fmt.Printf("  📊 Metric: FanIn completed (%d inputs) in %v\n", numInputs, duration)
+	fmt.Printf("  📊 Metric: FanIn[%s] completed (%d inputs) in %v\n", stageName, numInputs, duration)
+}
+
+func (m *InMemoryMetricsCollector) PipelineStarted(ctx context.Context, pipelineName string) {
+	atomic.AddInt64(&m.pipelineStartedCount, 1)
+	fmt.Printf("  📊 Metric: Pipeline[%s] started\n", pipelineName)
+}
+
+func (m *InMemoryMetricsCollector) PipelineCompleted(ctx context.Context, name string, duration time.Duration, err error) {
+	atomic.AddInt64(&m.pipelineCompletedCount, 1)
+	fmt.Printf("  📊 Metric: Pipeline[%s] completed in %v with (%v)\n", name, duration, err)
+}
+
+func (m *InMemoryMetricsCollector) StageWorkerConcurrency(ctx context.Context, stageName string, concurrency int) {
+	atomic.AddInt64(&m.stageWorkerConcurrencyCount, 1)
+	fmt.Printf("  📊 Metric: StageWorker[%s] concurrency: %d\n", stageName, concurrency)
+}
+
+func (m *InMemoryMetricsCollector) StageWorkerItemProcessed(ctx context.Context, stageName string, duration time.Duration) {
+	atomic.AddInt64(&m.stageWorkerItemProcessedCount, 1)
+	fmt.Printf("  📊 Metric: StageWorker[%s] item processed in %v\n", stageName, duration)
+}
+
+func (m *InMemoryMetricsCollector) StageWorkerItemSkipped(ctx context.Context, stageName string, err error) {
+	atomic.AddInt64(&m.stageWorkerItemSkippedCount, 1)
+	fmt.Printf("  📊 Metric: StageWorker[%s] item skipped: %v\n", stageName, err)
+}
+
+func (m *InMemoryMetricsCollector) StageWorkerErrorSent(ctx context.Context, stageName string, err error) {
+	atomic.AddInt64(&m.stageWorkerErrorSentCount, 1)
+	fmt.Printf("  📊 Metric: StageWorker[%s] error sent: %v\n", stageName, err)
 }
 
 // PrintStats displays the collected metrics.
 func (m *InMemoryMetricsCollector) PrintStats() {
 	fmt.Println("\n📈 Collected Metrics Summary:")
 	fmt.Println("----------------------------")
+	fmt.Printf("Pipeline Started: %d\n", atomic.LoadInt64(&m.pipelineStartedCount))
+	fmt.Printf("Pipeline Completed: %d\n", atomic.LoadInt64(&m.pipelineCompletedCount))
 	fmt.Printf("Stage Started: %d\n", atomic.LoadInt64(&m.stageStartedCount))
 	fmt.Printf("Stage Completed: %d\n", atomic.LoadInt64(&m.stageCompletedCount))
 	fmt.Printf("Stage Errors: %d\n", atomic.LoadInt64(&m.stageErrorCount))
@@ -272,12 +311,20 @@ func main() {
 	pipeline := fluxus.NewPipeline(chainedStage)
 	fmt.Println("✅ Pipeline built.")
 
+	metricatedPipeline := fluxus.NewMetricatedPipeline(
+		pipeline,
+		fluxus.WithPipelineName[string, string]("demo-pipeline"),
+		fluxus.WithPipelineMetricsCollector[string, string](collector),
+	)
+	fmt.Println("   - Wrapped pipeline with metrics.")
+	fmt.Println("✅ Pipeline wrapped with metrics.")
+
 	// 6. Process some data
 	fmt.Println("\n▶️ Processing input ' Hello Metrics World '...")
 	ctx := context.Background()
 	startTime := time.Now()
 
-	result, err := pipeline.Process(ctx, " Hello Metrics World ")
+	result, err := metricatedPipeline.Process(ctx, " Hello Metrics World ")
 
 	duration := time.Since(startTime)
 
