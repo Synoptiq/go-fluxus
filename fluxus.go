@@ -4,16 +4,60 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
+	"runtime"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+)
+
+// ErrorHandlingStrategy defines how item-level errors are handled in a stream adapter.
+type ErrorHandlingStrategy int
+
+const (
+	// SkipOnError logs the error (if logger is provided) and continues processing the next item.
+	// This is the default strategy.
+	SkipOnError ErrorHandlingStrategy = iota
+	// StopOnError logs the error and returns it, causing the ProcessStream method to terminate,
+	// effectively stopping this stage and potentially the entire pipeline.
+	StopOnError
+	// SendToErrorChannel sends the item and the processing error to a dedicated error channel.
+	// Processing continues with the next item unless the error channel blocks indefinitely or the context is cancelled.
+	SendToErrorChannel
 )
 
 // ErrPipelineCancelled is returned when a pipeline is cancelled.
 var ErrPipelineCancelled = errors.New("pipeline cancelled")
+
+// ProcessingError bundles an item with the error encountered during its processing.
+// Used with the SendToErrorChannel strategy.
+type ProcessingError[I any] struct {
+	Item  I
+	Error error
+}
 
 // Stage represents a processing stage in a pipeline.
 // It takes an input of type I and produces an output of type O.
 // The stage can also return an error if processing fails.
 type Stage[I, O any] interface {
 	Process(ctx context.Context, input I) (O, error)
+}
+
+// StreamStage defines the interface for a continuous stream processing stage.
+type StreamStage[I, O any] interface {
+	// ProcessStream reads items from 'in', processes them, and sends results to 'out'.
+	// It should run until 'in' is closed or 'ctx' is cancelled.
+	//
+	// Implementations MUST ensure 'out' is closed before returning,
+	// typically using `defer close(out)`, to signal downstream stages that no more
+	// data will be sent.
+	//
+	// Returning a non-nil error indicates a fatal error for this stage,
+	// which should typically lead to the pipeline shutting down. Item-level
+	// processing errors should be handled within the stage (e.g., logged, skipped,
+	// sent to a separate error channel).
+	ProcessStream(ctx context.Context, in <-chan I, out chan<- O) error
 }
 
 // StageFunc is a function that implements the Stage interface.
@@ -119,40 +163,341 @@ func ChainMany[I, O any](stages ...interface{}) Stage[I, O] {
 	})
 }
 
-// Pipeline represents a sequence of processing stages.
-type Pipeline[I, O any] struct {
-	stage      Stage[I, O]
-	errHandler func(error) error
-}
+// StreamAdapterOption is a function type used to configure a StreamAdapter.
+type StreamAdapterOption[I, O any] func(*StreamAdapter[I, O])
 
-// NewPipeline creates a new pipeline with a single stage.
-func NewPipeline[I, O any](stage Stage[I, O]) *Pipeline[I, O] {
-	return &Pipeline[I, O]{
-		stage:      stage,
-		errHandler: func(err error) error { return err },
+// WithoutAdapterMetrics is a StreamAdapterOption that explicitly disables
+// StageWorker* metrics for the adapter instance it's applied to by setting
+// its collector to the NoopMetricsCollector.
+func WithoutAdapterMetrics[I, O any]() StreamAdapterOption[I, O] {
+	return func(sa *StreamAdapter[I, O]) {
+		sa.metricsCollector = DefaultMetricsCollector // DefaultMetricsCollector is the Noop one
 	}
 }
 
-// WithErrorHandler adds a custom error handler to the pipeline.
-func (p *Pipeline[I, O]) WithErrorHandler(handler func(error) error) *Pipeline[I, O] {
-	p.errHandler = handler
-	return p
+// WithAdapterMetrics sets the metrics collector and stage name for adapter-specific metrics.
+// This is typically called internally by the StreamPipeline builder.
+func WithAdapterMetrics[I, O any](collector MetricsCollector) StreamAdapterOption[I, O] {
+	return func(sa *StreamAdapter[I, O]) {
+		if collector != nil {
+			sa.metricsCollector = collector
+		} else {
+			sa.metricsCollector = DefaultMetricsCollector // Use default if nil
+		}
+	}
 }
 
-// Process runs the pipeline on the given input.
-func (p *Pipeline[I, O]) Process(ctx context.Context, input I) (O, error) {
-	var zero O
+// WithAdapterName sets the name for the StreamAdapter stage.
+// This is typically used for metrics collection and logging purposes.
+func WithAdapterName[I, O any](name string) StreamAdapterOption[I, O] {
+	return func(sa *StreamAdapter[I, O]) {
+		// Allow empty name, though pipeline usually provides one
+		sa.stageName = name
+	}
+}
 
-	// Check for context cancellation
-	if ctx.Err() != nil {
-		return zero, p.errHandler(ctx.Err())
+// WithAdapterConcurrency sets the number of concurrent workers for the StreamAdapter.
+//   - If n > 0, up to 'n' items will be processed concurrently. Output order is not guaranteed.
+//   - If n == 0, it defaults to runtime.NumCPU().
+//   - If n <= 0, processing will be sequential (concurrency = 1).
+//
+// Default is 1 (sequential).
+func WithAdapterConcurrency[I, O any](n int) StreamAdapterOption[I, O] {
+	return func(sa *StreamAdapter[I, O]) {
+		switch {
+		case n == 0:
+			// If n is 0, use the number of CPUs.
+			sa.concurrency = runtime.NumCPU()
+		case n < 0:
+			// If n is negative, force sequential processing (concurrency 1).
+			sa.concurrency = 1
+		default: // n > 0
+			// If n is positive, use the specified value.
+			sa.concurrency = n
+		}
+	}
+}
+
+// WithAdapterErrorStrategy sets the error handling strategy for item-level errors
+// encountered when calling the wrapped stage's Process method.
+// Default is SkipOnError.
+func WithAdapterErrorStrategy[I, O any](strategy ErrorHandlingStrategy) StreamAdapterOption[I, O] {
+	return func(sa *StreamAdapter[I, O]) {
+		sa.errStrategy = strategy
+	}
+}
+
+// WithAdapterLogger sets a custom logger for the StreamAdapter to use for logging
+// skipped items or other internal warnings/errors.
+// If nil, logging defaults to a logger that discards output.
+// WithAdapterLogger creates an option to set the logger for a StreamAdapter.
+func WithAdapterLogger[I, O any](logger *log.Logger) StreamAdapterOption[I, O] {
+	return func(adapter *StreamAdapter[I, O]) { // Assuming StreamAdapterOption is func(*StreamAdapter[I, O])
+		if logger == nil {
+			adapter.logger = log.New(io.Discard, "", 0) // Default to discard if nil
+		} else {
+			adapter.logger = logger
+		}
+		// Ensure StreamAdapter has a 'logger *log.Logger' field
+	}
+}
+
+// WithAdapterErrorChannel provides a channel for sending processing errors when
+// the strategy is SendToErrorChannel. The channel must be created and managed
+// (e.g., read from) by the caller. The StreamAdapter will block trying to send
+// to this channel if it's full, respecting backpressure, but will stop trying
+// if the main context is cancelled.
+// This option is mandatory if using SendToErrorChannel strategy.
+func WithAdapterErrorChannel[I, O any](errChan chan<- ProcessingError[I]) StreamAdapterOption[I, O] {
+	return func(sa *StreamAdapter[I, O]) {
+		sa.errChan = errChan
+	}
+}
+
+// WithAdapterBufferSize sets the buffer size for internal channels used by the StreamAdapter.
+// A larger buffer can improve throughput by reducing blocking, especially when processing rates
+// vary between stages. If size <= 0, channels will be unbuffered.
+func WithAdapterBufferSize[I, O any](size int) StreamAdapterOption[I, O] {
+	return func(sa *StreamAdapter[I, O]) {
+		sa.bufferSize = size
+	}
+}
+
+// StreamAdapter wraps a Stage to make it usable as a StreamStage, adding concurrency and error handling.
+type StreamAdapter[I, O any] struct {
+	wrappedStage     Stage[I, O]
+	concurrency      int
+	errStrategy      ErrorHandlingStrategy
+	logger           *log.Logger
+	errChan          chan<- ProcessingError[I] // Channel for SendToErrorChannel strategy
+	bufferSize       int
+	metricsCollector MetricsCollector // <<< Add Metrics Collector
+	stageName        string           // <<< Add Stage Name
+}
+
+// NewStreamAdapter creates a StreamStage adapter for a given Stage with optional configuration.
+func NewStreamAdapter[I, O any](stage Stage[I, O], options ...StreamAdapterOption[I, O]) *StreamAdapter[I, O] {
+	if stage == nil {
+		panic("fluxus.NewStreamAdapter: wrappedStage cannot be nil")
 	}
 
-	// Process through the stage
-	result, err := p.stage.Process(ctx, input)
-	if err != nil {
-		return zero, p.errHandler(err)
+	// Set defaults
+	sa := &StreamAdapter[I, O]{
+		wrappedStage:     stage,
+		concurrency:      1,                        // Default to sequential
+		errStrategy:      SkipOnError,              // Default to skipping errors
+		logger:           nil,                      // Default to nil, will be replaced by discard logger if needed
+		errChan:          nil,                      // Default to nil
+		bufferSize:       0,                        // Default to unbuffered channels
+		metricsCollector: DefaultMetricsCollector,  // <<< Initialize collector
+		stageName:        "unnamed_stream_adapter", // <<< Initialize name
 	}
 
-	return result, nil
+	// Apply options
+	for _, option := range options {
+		option(sa)
+	}
+
+	// Set discard logger if none was provided
+	if sa.logger == nil {
+		sa.logger = log.New(io.Discard, "", 0)
+	}
+
+	// Validate configuration
+	if sa.errStrategy == SendToErrorChannel && sa.errChan == nil {
+		panic("fluxus.NewStreamAdapter: WithErrorChannel must be provided when using SendToErrorChannel strategy")
+	}
+
+	// --- Metrics: Report Concurrency ---
+	// Report concurrency after all options are applied
+	sa.metricsCollector.StageWorkerConcurrency(context.Background(), sa.stageName, sa.concurrency) // Use background context as this isn't per-item
+
+	return sa
+}
+
+// ProcessStream implements the StreamStage interface for the adapter.
+// It handles both sequential and concurrent processing based on the concurrency setting.
+func (a *StreamAdapter[I, O]) ProcessStream(ctx context.Context, in <-chan I, out chan<- O) error {
+	// CRITICAL: Ensure the output channel is closed when this function returns,
+	// regardless of whether it's a normal exit or an error.
+	defer close(out)
+
+	if a.concurrency <= 1 {
+		// Use sequential processing for concurrency 1 or less
+		return a.processSequential(ctx, in, out)
+	}
+
+	// Use concurrent processing for concurrency > 1
+	return a.processConcurrent(ctx, in, out)
+}
+
+// processSequential handles processing items one by one.
+func (a *StreamAdapter[I, O]) processSequential(ctx context.Context, in <-chan I, out chan<- O) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err() // Context cancelled
+
+		case item, ok := <-in:
+			if !ok {
+				return nil // Input channel closed, normal exit
+			}
+
+			// Process the item
+			itemStartTime := time.Now()
+			result, err := a.wrappedStage.Process(ctx, item)
+			itemDuration := time.Since(itemStartTime)
+
+			if err != nil {
+				// Handle error based on strategy
+				_, processErr := a.handleItemError(ctx, item, err)
+				if processErr != nil {
+					// StopOnError strategy returned an error
+					return processErr
+				}
+				// SkipOnError or SendToErrorChannel handled, continue loop
+				continue
+			}
+
+			// --- Metrics: Report successful processing ---
+			a.metricsCollector.StageWorkerItemProcessed(ctx, a.stageName, itemDuration)
+			// --- End Metrics ---
+
+			// Send successful result downstream, checking for cancellation
+			select {
+			case out <- result:
+				// Successfully sent
+			case <-ctx.Done():
+				// Cancelled while sending
+				return ctx.Err()
+			}
+		}
+	}
+}
+
+// processConcurrent handles processing items using multiple goroutines.
+func (a *StreamAdapter[I, O]) processConcurrent(ctx context.Context, in <-chan I, out chan<- O) error {
+	g, gctx := errgroup.WithContext(ctx)
+	jobs := make(chan I, a.bufferSize) // Consider adding a small buffer if needed, e.g., make(chan I, a.concurrency)
+
+	// Start dispatcher goroutine
+	g.Go(func() error {
+		defer close(jobs) // Ensure jobs channel is closed when dispatcher finishes
+		return a.dispatchJobs(gctx, in, jobs)
+	})
+
+	// Start worker goroutines
+	for i := 0; i < a.concurrency; i++ {
+		g.Go(func() error {
+			return a.runWorker(gctx, jobs, out)
+		})
+	}
+
+	// Wait for all goroutines (dispatcher and workers)
+	return g.Wait()
+}
+
+// dispatchJobs reads from the input channel and sends items to the jobs channel.
+func (a *StreamAdapter[I, O]) dispatchJobs(gctx context.Context, in <-chan I, jobs chan<- I) error {
+	for {
+		select {
+		case <-gctx.Done(): // Check for cancellation first
+			return gctx.Err()
+		case item, ok := <-in:
+			if !ok {
+				return nil // Input channel closed, normal exit for dispatcher
+			}
+			// Send item to workers, checking for cancellation during send
+			select {
+			case jobs <- item:
+				// Item sent successfully
+			case <-gctx.Done():
+				return gctx.Err() // Cancelled while waiting to send job
+			}
+		}
+	}
+}
+
+// runWorker reads items from the jobs channel, processes them, and sends results/handles errors.
+func (a *StreamAdapter[I, O]) runWorker(gctx context.Context, jobs <-chan I, out chan<- O) error {
+	for item := range jobs { // Loop until 'jobs' channel is closed and empty
+		// --- Metrics: Track item processing time ---
+		itemStartTime := time.Now()
+		result, err := a.wrappedStage.Process(gctx, item)
+		itemDuration := time.Since(itemStartTime)
+		// --- End Metrics ---
+
+		if err != nil {
+			// Handle error based on strategy
+			_, processErr := a.handleItemError(gctx, item, err)
+			if processErr != nil {
+				// StopOnError strategy: return the error to errgroup
+				return processErr // This cancels gctx for others
+			}
+			// SkipOnError or SendToErrorChannel handled, continue loop
+			continue
+		}
+
+		// --- Metrics: Report successful processing ---
+		a.metricsCollector.StageWorkerItemProcessed(gctx, a.stageName, itemDuration)
+		// --- End Metrics ---
+
+		// Send successful result downstream, checking for cancellation
+		select {
+		case out <- result:
+			// Successfully sent
+		case <-gctx.Done():
+			// Context cancelled (by parent, another worker error, etc.) while sending
+			return gctx.Err()
+		}
+	}
+	return nil // Worker finished normally after jobs channel closed
+}
+
+// handleItemError centralizes the logic for dealing with errors from wrappedStage.Process.
+// It returns whether processing should continue for the current item (relevant for concurrent)
+// and any fatal error (only for StopOnError strategy).
+func (a *StreamAdapter[I, O]) handleItemError(ctx context.Context, item I, err error) (bool, error) {
+	switch a.errStrategy {
+	case StopOnError:
+		// Log and return the error to stop the stage/pipeline
+		a.logf("ERROR: fluxus.StreamAdapter stopping due to error: %v", err)
+		return false, err // Signal to stop and return the error
+
+	case SendToErrorChannel:
+		// Send the item and error to the configured error channel
+		processingErr := ProcessingError[I]{Item: item, Error: err}
+		select {
+		case a.errChan <- processingErr:
+			// --- Metrics: Report error sent ---
+			a.metricsCollector.StageWorkerErrorSent(ctx, a.stageName, err)
+			// --- End Metrics ---
+			// Successfully sent error
+			a.logf("DEBUG: fluxus.StreamAdapter sent item error to error channel: %v", err)
+		case <-ctx.Done():
+			// Context cancelled while trying to send error
+			a.logf("WARN: fluxus.StreamAdapter context cancelled while sending item error: %v", err)
+			// Depending on requirements, you might want to return ctx.Err() here
+			// but typically SendToErrorChannel implies continuing if possible.
+		}
+		return true, nil // Signal to continue processing next item
+
+	case SkipOnError:
+		fallthrough // Fallthrough to default skip behavior
+	default: // SkipOnError is the default
+		// --- Metrics: Report item skipped ---
+		a.metricsCollector.StageWorkerItemSkipped(ctx, a.stageName, err)
+		// --- End Metrics ---
+		// Log and continue to the next item
+		a.logf("WARN: fluxus.StreamAdapter skipping item due to error: %v", err)
+		return true, nil // Signal to continue processing next item
+	}
+}
+
+// logf is a helper to log using the configured logger.
+func (a *StreamAdapter[I, O]) logf(format string, v ...interface{}) {
+	// Check logger again in case it was initially nil and replaced by discard logger
+	if a.logger != nil {
+		a.logger.Printf(format, v...)
+	}
 }
