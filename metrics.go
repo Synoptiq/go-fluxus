@@ -219,8 +219,8 @@ func WithMetricsCollector[I, O any](collector MetricsCollector) MetricatedStageO
 	}
 }
 
-// WithStageName adds a name to the metricated stage for metrics and logging.
-func WithStageName[I, O any](name string) MetricatedStageOption[I, O] {
+// WithMetricsStageName adds a name to the metricated stage for metrics and logging.
+func WithMetricsStageName[I, O any](name string) MetricatedStageOption[I, O] {
 	return func(ms *MetricatedStage[I, O]) {
 		ms.name = name
 	}
@@ -231,6 +231,10 @@ func NewMetricatedStage[I, O any](
 	stage Stage[I, O],
 	options ...MetricatedStageOption[I, O],
 ) *MetricatedStage[I, O] {
+	if stage == nil {
+		panic("fluxus.NewMetricatedStage: stage cannot be nil")
+	}
+
 	ms := &MetricatedStage[I, O]{
 		stage:            stage,
 		name:             "metricated_stage",
@@ -282,6 +286,10 @@ func NewMetricatedFanOut[I, O any](
 	fanOut *FanOut[I, O],
 	options ...MetricatedStageOption[I, []O],
 ) Stage[I, []O] {
+	if fanOut == nil {
+		panic("fluxus.NewMetricatedFanOut: fanOut cannot be nil")
+	}
+
 	// Create a proxy for handling options
 	ms := &MetricatedStage[I, []O]{
 		stage:            fanOut,
@@ -342,6 +350,10 @@ func NewMetricatedFanIn[I, O any](
 	fanIn *FanIn[I, O],
 	options ...MetricatedStageOption[[]I, O],
 ) Stage[[]I, O] {
+	if fanIn == nil {
+		panic("fluxus.NewMetricatedFanIn: fanIn cannot be nil")
+	}
+
 	// Create a proxy for handling options
 	ms := &MetricatedStage[[]I, O]{
 		stage:            fanIn,
@@ -402,6 +414,10 @@ func NewMetricatedBuffer[I, O any](
 	buffer *Buffer[I, O],
 	options ...MetricatedStageOption[[]I, []O],
 ) Stage[[]I, []O] {
+	if buffer == nil {
+		panic("fluxus.NewMetricatedBuffer: buffer cannot be nil")
+	}
+
 	// Create a proxy for handling options
 	ms := &MetricatedStage[[]I, []O]{
 		stage:            buffer,
@@ -460,6 +476,10 @@ func NewMetricatedRetry[I, O any](
 	retry *Retry[I, O],
 	options ...MetricatedStageOption[I, O],
 ) Stage[I, O] {
+	if retry == nil {
+		panic("fluxus.NewMetricatedRetry: retry cannot be nil")
+	}
+
 	// Create a proxy for handling options
 	ms := &MetricatedStage[I, O]{
 		stage:            retry,
