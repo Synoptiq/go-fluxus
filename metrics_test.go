@@ -104,7 +104,7 @@ func TestMetricatedStage(t *testing.T) {
 	// Wrap it with metrics
 	metricated := fluxus.NewMetricatedStage(
 		stage,
-		fluxus.WithStageName[string, string]("test_stage"),
+		fluxus.WithMetricsStageName[string, string]("test_stage"),
 		fluxus.WithMetricsCollector[string, string](collector),
 	)
 
@@ -145,7 +145,7 @@ func TestMetricatedStageError(t *testing.T) {
 	// Wrap it with metrics
 	metricated := fluxus.NewMetricatedStage(
 		stage,
-		fluxus.WithStageName[string, string]("error_stage"),
+		fluxus.WithMetricsStageName[string, string]("error_stage"),
 		fluxus.WithMetricsCollector[string, string](collector),
 	)
 
@@ -187,7 +187,7 @@ func TestMetricatedFanOut(t *testing.T) {
 	// Wrap with metrics
 	metricated := fluxus.NewMetricatedFanOut(
 		fanOut,
-		fluxus.WithStageName[string, []string]("test_fan_out"),
+		fluxus.WithMetricsStageName[string, []string]("test_fan_out"),
 		fluxus.WithMetricsCollector[string, []string](collector),
 	)
 
@@ -230,7 +230,7 @@ func TestMetricatedFanIn(t *testing.T) {
 	// Wrap with metrics
 	metricated := fluxus.NewMetricatedFanIn(
 		fanIn,
-		fluxus.WithStageName[[]string, string]("test_fan_in"),
+		fluxus.WithMetricsStageName[[]string, string]("test_fan_in"),
 		fluxus.WithMetricsCollector[[]string, string](collector),
 	)
 
@@ -282,7 +282,7 @@ func TestMetricatedRetry(t *testing.T) {
 	// Wrap with metrics
 	metricated := fluxus.NewMetricatedRetry(
 		retry,
-		fluxus.WithStageName[string, string]("test_retry"),
+		fluxus.WithMetricsStageName[string, string]("test_retry"),
 		fluxus.WithMetricsCollector[string, string](collector),
 	)
 
@@ -333,7 +333,7 @@ func BenchmarkMetricatedStage(b *testing.B) {
 		collector := &mockMetricsCollector{}
 		metricated := fluxus.NewMetricatedStage(
 			stage,
-			fluxus.WithStageName[string, string]("benchmark_stage"),
+			fluxus.WithMetricsStageName[string, string]("benchmark_stage"),
 			fluxus.WithMetricsCollector[string, string](collector),
 		)
 
