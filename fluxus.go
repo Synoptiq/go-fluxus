@@ -9,6 +9,9 @@ import (
 	"runtime"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -192,7 +195,7 @@ func WithAdapterMetrics[I, O any](collector MetricsCollector) StreamAdapterOptio
 func WithAdapterName[I, O any](name string) StreamAdapterOption[I, O] {
 	return func(sa *StreamAdapter[I, O]) {
 		// Allow empty name, though pipeline usually provides one
-		sa.stageName = name
+		sa.adapterName = name
 	}
 }
 
@@ -259,7 +262,22 @@ func WithAdapterErrorChannel[I, O any](errChan chan<- ProcessingError[I]) Stream
 // vary between stages. If size <= 0, channels will be unbuffered.
 func WithAdapterBufferSize[I, O any](size int) StreamAdapterOption[I, O] {
 	return func(sa *StreamAdapter[I, O]) {
+		if size < 0 {
+			size = 0
+		}
 		sa.bufferSize = size
+	}
+}
+
+// WithAdapterTracerProvider sets the TracerProvider for the adapter.
+// Defaults to DefaultTracerProvider.
+func WithAdapterTracerProvider[I, O any](provider TracerProvider) StreamAdapterOption[I, O] { // <-- Add
+	return func(sa *StreamAdapter[I, O]) {
+		if provider != nil {
+			sa.tracerProvider = provider
+		} else {
+			sa.tracerProvider = DefaultTracerProvider // Ensure it's never nil
+		}
 	}
 }
 
@@ -272,7 +290,9 @@ type StreamAdapter[I, O any] struct {
 	errChan          chan<- ProcessingError[I] // Channel for SendToErrorChannel strategy
 	bufferSize       int
 	metricsCollector MetricsCollector // <<< Add Metrics Collector
-	stageName        string           // <<< Add Stage Name
+	adapterName      string           // <<< Add Stage Name
+	tracerProvider   TracerProvider   // <-- Add
+	tracer           trace.Tracer     // <-- Add
 }
 
 // NewStreamAdapter creates a StreamStage adapter for a given Stage with optional configuration.
@@ -290,7 +310,7 @@ func NewStreamAdapter[I, O any](stage Stage[I, O], options ...StreamAdapterOptio
 		errChan:          nil,                      // Default to nil
 		bufferSize:       0,                        // Default to unbuffered channels
 		metricsCollector: DefaultMetricsCollector,  // <<< Initialize collector
-		stageName:        "unnamed_stream_adapter", // <<< Initialize name
+		adapterName:      "unnamed_stream_adapter", // <<< Initialize name
 	}
 
 	// Apply options
@@ -303,6 +323,19 @@ func NewStreamAdapter[I, O any](stage Stage[I, O], options ...StreamAdapterOptio
 		sa.logger = log.New(io.Discard, "", 0)
 	}
 
+	// Ensure metrics collector is not nil
+	if sa.metricsCollector == nil {
+		sa.metricsCollector = DefaultMetricsCollector
+	}
+
+	// Ensure tracer provider is not nil
+	if sa.tracerProvider == nil { // <-- Add check
+		sa.tracerProvider = DefaultTracerProvider
+	}
+
+	// Create the tracer instance using the provider and adapter name
+	sa.tracer = sa.tracerProvider.Tracer(fmt.Sprintf("fluxus/adapter/%s", sa.adapterName))
+
 	// Validate configuration
 	if sa.errStrategy == SendToErrorChannel && sa.errChan == nil {
 		panic("fluxus.NewStreamAdapter: WithErrorChannel must be provided when using SendToErrorChannel strategy")
@@ -310,7 +343,7 @@ func NewStreamAdapter[I, O any](stage Stage[I, O], options ...StreamAdapterOptio
 
 	// --- Metrics: Report Concurrency ---
 	// Report concurrency after all options are applied
-	sa.metricsCollector.StageWorkerConcurrency(context.Background(), sa.stageName, sa.concurrency) // Use background context as this isn't per-item
+	sa.metricsCollector.StageWorkerConcurrency(context.Background(), sa.adapterName, sa.concurrency) // Use background context as this isn't per-item
 
 	return sa
 }
@@ -343,14 +376,32 @@ func (a *StreamAdapter[I, O]) processSequential(ctx context.Context, in <-chan I
 				return nil // Input channel closed, normal exit
 			}
 
+			// --- Start Tracing Span ---
+			itemCtx, itemSpan := a.tracer.Start(ctx, fmt.Sprintf("%s.process", a.adapterName), // Span name: adapterName.process
+				trace.WithAttributes(
+					attribute.String("fluxus.adapter.name", a.adapterName),
+					attribute.Int("fluxus.adapter.concurrency", 1), // Explicitly 1 for sequential
+					attribute.String("fluxus.adapter.error_strategy", a.errStrategy.String()),
+					// Add item-specific attributes here if possible/relevant
+				),
+				// Link to parent span from ctx automatically
+			)
+			// ---
+
 			// Process the item
 			itemStartTime := time.Now()
 			result, err := a.wrappedStage.Process(ctx, item)
 			itemDuration := time.Since(itemStartTime)
 
 			if err != nil {
+				// --- Record error and set status in span ---
+				itemSpan.RecordError(err)
+				itemSpan.SetStatus(codes.Error, err.Error())
+				// ---
+
 				// Handle error based on strategy
 				_, processErr := a.handleItemError(ctx, item, err)
+				itemSpan.End() // End the span after processing the item
 				if processErr != nil {
 					// StopOnError strategy returned an error
 					return processErr
@@ -359,18 +410,26 @@ func (a *StreamAdapter[I, O]) processSequential(ctx context.Context, in <-chan I
 				continue
 			}
 
+			// --- Set success status and duration attribute ---
+			itemSpan.SetStatus(codes.Ok, "")
+			itemSpan.SetAttributes(attribute.Int64("fluxus.adapter.stage.duration_ms", itemDuration.Milliseconds()))
+			// ---
+
 			// --- Metrics: Report successful processing ---
-			a.metricsCollector.StageWorkerItemProcessed(ctx, a.stageName, itemDuration)
+			a.metricsCollector.StageWorkerItemProcessed(ctx, a.adapterName, itemDuration)
 			// --- End Metrics ---
 
 			// Send successful result downstream, checking for cancellation
 			select {
 			case out <- result:
-				// Successfully sent
-			case <-ctx.Done():
-				// Cancelled while sending
-				return ctx.Err()
+			// Successfully sent
+			case <-itemCtx.Done(): // Use itemCtx
+				itemSpan.SetAttributes(attribute.Bool("fluxus.adapter.cancelled_on_send", true))
+				itemSpan.SetStatus(codes.Error, "cancelled while sending output")
+				itemSpan.End() // End span before returning error
+				return itemCtx.Err()
 			}
+			itemSpan.End() // --- End Tracing Span ---
 		}
 	}
 }
@@ -421,6 +480,18 @@ func (a *StreamAdapter[I, O]) dispatchJobs(gctx context.Context, in <-chan I, jo
 // runWorker reads items from the jobs channel, processes them, and sends results/handles errors.
 func (a *StreamAdapter[I, O]) runWorker(gctx context.Context, jobs <-chan I, out chan<- O) error {
 	for item := range jobs { // Loop until 'jobs' channel is closed and empty
+		// --- Start Tracing Span ---
+		// Use gctx as parent, but create a new context for the item processing span
+		itemCtx, itemSpan := a.tracer.Start(gctx, fmt.Sprintf("%s.process", a.adapterName), // Span name: adapterName.process
+			trace.WithAttributes(
+				attribute.String("fluxus.adapter.name", a.adapterName),
+				attribute.Int("fluxus.adapter.concurrency", a.concurrency),
+				attribute.String("fluxus.adapter.error_strategy", a.errStrategy.String()),
+				// Add item-specific attributes here if possible/relevant
+			),
+		)
+		// ---
+
 		// --- Metrics: Track item processing time ---
 		itemStartTime := time.Now()
 		result, err := a.wrappedStage.Process(gctx, item)
@@ -428,8 +499,14 @@ func (a *StreamAdapter[I, O]) runWorker(gctx context.Context, jobs <-chan I, out
 		// --- End Metrics ---
 
 		if err != nil {
+			// --- Record error and set status in span ---
+			itemSpan.RecordError(err)
+			itemSpan.SetStatus(codes.Error, err.Error())
+			// ---
+
 			// Handle error based on strategy
 			_, processErr := a.handleItemError(gctx, item, err)
+			itemSpan.End()
 			if processErr != nil {
 				// StopOnError strategy: return the error to errgroup
 				return processErr // This cancels gctx for others
@@ -438,18 +515,26 @@ func (a *StreamAdapter[I, O]) runWorker(gctx context.Context, jobs <-chan I, out
 			continue
 		}
 
+		// --- Set success status and duration attribute ---
+		itemSpan.SetStatus(codes.Ok, "")
+		itemSpan.SetAttributes(attribute.Int64("fluxus.adapter.stage.duration_ms", itemDuration.Milliseconds()))
+		// ---
+
 		// --- Metrics: Report successful processing ---
-		a.metricsCollector.StageWorkerItemProcessed(gctx, a.stageName, itemDuration)
+		a.metricsCollector.StageWorkerItemProcessed(gctx, a.adapterName, itemDuration)
 		// --- End Metrics ---
 
 		// Send successful result downstream, checking for cancellation
 		select {
 		case out <- result:
-			// Successfully sent
-		case <-gctx.Done():
-			// Context cancelled (by parent, another worker error, etc.) while sending
-			return gctx.Err()
+		// Successfully sent
+		case <-itemCtx.Done(): // Use itemCtx
+			itemSpan.SetAttributes(attribute.Bool("fluxus.adapter.cancelled_on_send", true))
+			itemSpan.SetStatus(codes.Error, "cancelled while sending output")
+			itemSpan.End() // End span before returning error
+			return itemCtx.Err()
 		}
+		itemSpan.End() // --- End Tracing Span ---
 	}
 	return nil // Worker finished normally after jobs channel closed
 }
@@ -470,7 +555,7 @@ func (a *StreamAdapter[I, O]) handleItemError(ctx context.Context, item I, err e
 		select {
 		case a.errChan <- processingErr:
 			// --- Metrics: Report error sent ---
-			a.metricsCollector.StageWorkerErrorSent(ctx, a.stageName, err)
+			a.metricsCollector.StageWorkerErrorSent(ctx, a.adapterName, err)
 			// --- End Metrics ---
 			// Successfully sent error
 			a.logf("DEBUG: fluxus.StreamAdapter sent item error to error channel: %v", err)
@@ -486,7 +571,7 @@ func (a *StreamAdapter[I, O]) handleItemError(ctx context.Context, item I, err e
 		fallthrough // Fallthrough to default skip behavior
 	default: // SkipOnError is the default
 		// --- Metrics: Report item skipped ---
-		a.metricsCollector.StageWorkerItemSkipped(ctx, a.stageName, err)
+		a.metricsCollector.StageWorkerItemSkipped(ctx, a.adapterName, err)
 		// --- End Metrics ---
 		// Log and continue to the next item
 		a.logf("WARN: fluxus.StreamAdapter skipping item due to error: %v", err)
@@ -499,5 +584,19 @@ func (a *StreamAdapter[I, O]) logf(format string, v ...interface{}) {
 	// Check logger again in case it was initially nil and replaced by discard logger
 	if a.logger != nil {
 		a.logger.Printf(format, v...)
+	}
+}
+
+// String representation for ErrorHandlingStrategy (useful for attributes)
+func (e ErrorHandlingStrategy) String() string {
+	switch e {
+	case SkipOnError:
+		return "SkipOnError"
+	case StopOnError:
+		return "StopOnError"
+	case SendToErrorChannel:
+		return "SendToErrorChannel"
+	default:
+		return fmt.Sprintf("Unknown(%d)", int(e))
 	}
 }
