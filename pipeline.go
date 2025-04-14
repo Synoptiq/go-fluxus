@@ -66,17 +66,22 @@ type streamPipelineConfig struct {
 	concurrency      int              // Number of concurrent goroutines for each stage
 	metricsCollector MetricsCollector // Optional metrics collector for stages
 	pipelineName     string           // Optional name for the pipeline
-	tracer           trace.Tracer     // Optional tracer for OpenTelemetry
+	tracerProvider   TracerProvider
+	tracer           trace.Tracer
 }
 
 // StreamPipelineOption defines a function that modifies the pipeline configuration.
 type StreamPipelineOption func(*streamPipelineConfig)
 
-// WithStreamTracer sets the OpenTelemetry Tracer for the pipeline.
+// WithStreamTracerProvider sets the OpenTelemetry Tracer for the pipeline.
 // If set to nil or not called, no pipeline/stage spans will be created by Run.
-func WithStreamTracer(tracer trace.Tracer) StreamPipelineOption {
+func WithStreamTracerProvider(provider TracerProvider) StreamPipelineOption {
 	return func(cfg *streamPipelineConfig) {
-		cfg.tracer = tracer // Allow setting nil
+		if provider != nil {
+			cfg.tracerProvider = provider
+		} else {
+			cfg.tracerProvider = DefaultTracerProvider // Ensure it's never nil
+		}
 	}
 }
 
@@ -170,6 +175,7 @@ func NewStreamPipeline[I any](options ...StreamPipelineOption) *StreamPipelineBu
 		metricsCollector: nil,                        // Default nil collector
 		pipelineName:     "fluxus_stream_pipeline",   // Default name
 		tracer:           nil,                        // Default nil tracer
+		tracerProvider:   DefaultTracerProvider,
 	}
 
 	for _, option := range options {
@@ -241,7 +247,9 @@ func AddStage[CurrentOutput, NextOutput any](
 			// Apply adapter concurrency as a default adapter concurrency
 			WithAdapterConcurrency[CurrentOutput, NextOutput](builder.cfg.concurrency),
 			// Apply metrics collector as a default adapter metrics collector
-			// WithAdapterMetrics[CurrentOutput, NextOutput](builder.cfg.metricsCollector),
+			WithAdapterMetrics[CurrentOutput, NextOutput](builder.cfg.metricsCollector),
+			// Apply tracer as a default adapter tracer
+			WithAdapterTracerProvider[CurrentOutput, NextOutput](builder.cfg.tracerProvider),
 		}
 
 		// Append the user-provided options. Options provided later might override earlier ones
@@ -410,29 +418,37 @@ func Run[I, O any](
 		return errors.New("fluxus.Run: cannot run an empty pipeline")
 	}
 	// --- Tracing Setup ---
-	tracer := pipeline.cfg.tracer // Might be nil
+	// Ensure tracer provider is not nil
+	if pipeline.cfg.tracerProvider == nil { // <-- Add check
+		pipeline.cfg.tracerProvider = DefaultTracerProvider
+	}
 	pipelineName := pipeline.cfg.pipelineName
+	// Create the tracer instance using the provider and adapter name
+	pipeline.cfg.tracer = pipeline.cfg.tracerProvider.Tracer(fmt.Sprintf("fluxus/pipeline/%s", pipelineName))
+	tracer := pipeline.cfg.tracer // Might be nil
+
 	pipelineCtx := ctx // Start with the original context
 	var pipelineSpan trace.Span
-	if tracer != nil { // <<< Check if tracer is configured
-		// Start overall pipeline span if tracer exists
-		pipelineCtx, pipelineSpan = tracer.Start(ctx, fmt.Sprintf("%s.Run", pipelineName),
-			trace.WithAttributes(
-				attribute.String("fluxus.pipeline.name", pipelineName),
-				attribute.Int("fluxus.pipeline.stages", len(pipeline.stages)),
-			),
-			trace.WithSpanKind(trace.SpanKindConsumer),
-		)
-		defer func() { // This defer will only run if pipelineSpan is not nil
-			if runErr != nil {
-				pipelineSpan.RecordError(runErr)
-				pipelineSpan.SetStatus(codes.Error, runErr.Error())
-			} else {
-				pipelineSpan.SetStatus(codes.Ok, "")
-			}
-			pipelineSpan.End()
-		}()
-	}
+
+	// Start overall pipeline span if tracer exists
+	pipelineCtx, pipelineSpan = tracer.Start(pipelineCtx, fmt.Sprintf("%s.Run", pipelineName),
+		trace.WithAttributes(
+			attribute.String("fluxus.pipeline.name", pipelineName),
+			attribute.Int("fluxus.pipeline.stages", len(pipeline.stages)),
+		),
+		trace.WithSpanKind(trace.SpanKindConsumer),
+	)
+
+	defer func() { // This defer will only run if pipelineSpan is not nil
+		if runErr != nil {
+			pipelineSpan.RecordError(runErr)
+			pipelineSpan.SetStatus(codes.Error, runErr.Error())
+		} else {
+			pipelineSpan.SetStatus(codes.Ok, "")
+		}
+		pipelineSpan.End()
+	}()
+
 	// --- End Tracing Setup ---
 	// --- Metrics Integration Start ---
 	startTime := time.Now()
@@ -481,14 +497,14 @@ func Run[I, O any](
 				stageCtx, stageSpan = tracer.Start(gctx, // Use errgroup's context as parent
 					fmt.Sprintf("Stage[%d]:%s", stageIndex, currentStage.name),
 					trace.WithAttributes(
-						attribute.String("fluxus.stage.name", currentStage.name),
-						attribute.Int("fluxus.stage.index", stageIndex),
+						attribute.String("fluxus.pipeline.stage.name", currentStage.name),
+						attribute.Int("fluxus.pipeline.stage.index", stageIndex),
 					),
 					trace.WithSpanKind(trace.SpanKindInternal),
 				)
 				defer func() { // This defer only runs if stageSpan is not nil
 					stageDuration := time.Since(stageStartTime)
-					stageSpan.SetAttributes(attribute.Float64("fluxus.stage.duration", float64(stageDuration.Milliseconds())))
+					stageSpan.SetAttributes(attribute.Int64("fluxus.pipeline.stage.duration_ms", stageDuration.Milliseconds()))
 					stageSpan.End()
 				}()
 				// --- Stage Span End ---
