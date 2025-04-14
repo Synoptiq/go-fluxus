@@ -240,7 +240,7 @@ func main() {
 	// Wrap initial stage
 	metricatedPrepare := fluxus.NewMetricatedStage(
 		prepareStage,
-		fluxus.WithStageName[string, string]("prepare"),
+		fluxus.WithMetricsStageName[string, string]("prepare"),
 		fluxus.WithMetricsCollector[string, string](collector),
 	)
 	fmt.Println("   - Wrapped 'prepare' stage.")
@@ -248,7 +248,7 @@ func main() {
 	// Wrap stages for FanOut
 	metricatedUppercase := fluxus.NewMetricatedStage(
 		uppercaseStage,
-		fluxus.WithStageName[string, string]("uppercase"),
+		fluxus.WithMetricsStageName[string, string]("uppercase"),
 		fluxus.WithMetricsCollector[string, string](collector),
 	)
 	fmt.Println("   - Wrapped 'uppercase' stage (for FanOut).")
@@ -259,7 +259,7 @@ func main() {
 	})
 	metricatedRetryReverse := fluxus.NewMetricatedRetry(
 		retryReverse,
-		fluxus.WithStageName[string, string]("retry-reverse"), // Name for the retry wrapper
+		fluxus.WithMetricsStageName[string, string]("retry-reverse"), // Name for the retry wrapper
 		fluxus.WithMetricsCollector[string, string](collector),
 	)
 	fmt.Println("   - Wrapped 'reverse' stage with Retry and Metrics (for FanOut).")
@@ -270,7 +270,7 @@ func main() {
 	// Wrap FanOut with metrics
 	metricatedFanOut := fluxus.NewMetricatedFanOut(
 		fanOut,
-		fluxus.WithStageName[string, []string]("parallel-transform"),
+		fluxus.WithMetricsStageName[string, []string]("parallel-transform"),
 		fluxus.WithMetricsCollector[string, []string](collector),
 	)
 	fmt.Println("   - Wrapped FanOut stage ('parallel-transform') with Metrics.")
@@ -281,7 +281,7 @@ func main() {
 	// Wrap FanIn with metrics
 	metricatedFanIn := fluxus.NewMetricatedFanIn(
 		fanIn,
-		fluxus.WithStageName[[]string, string]("aggregate-results"),
+		fluxus.WithMetricsStageName[[]string, string]("aggregate-results"),
 		fluxus.WithMetricsCollector[[]string, string](collector),
 	)
 	fmt.Println("   - Wrapped FanIn stage ('aggregate-results') with Metrics.")
@@ -289,7 +289,7 @@ func main() {
 	// Wrap final stage
 	metricatedPrefix := fluxus.NewMetricatedStage(
 		prefixStage,
-		fluxus.WithStageName[string, string]("prefix"),
+		fluxus.WithMetricsStageName[string, string]("prefix"),
 		fluxus.WithMetricsCollector[string, string](collector),
 	)
 	fmt.Println("   - Wrapped 'prefix' stage.")
