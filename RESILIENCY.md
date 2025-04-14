@@ -378,7 +378,7 @@ Make your resilience patterns observable:
 // Add metrics to circuit breaker
 metricated := fluxus.NewMetricatedStage(
     circuitBreaker,
-    fluxus.WithStageName[Input, Output]("service-circuit-breaker"),
+    fluxus.WithMetricsStageName[Input, Output]("service-circuit-breaker"),
 )
 
 // Add tracing to retry
