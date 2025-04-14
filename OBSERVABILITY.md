@@ -66,7 +66,7 @@ Use the `MetricatedStage` wrapper to add metrics collection to any stage:
 // Create a metricated stage wrapper
 metricated := fluxus.NewMetricatedStage(
     stage,
-    fluxus.WithStageName[Input, Output]("my-processing-stage"),
+    fluxus.WithMetricsStageName[Input, Output]("my-processing-stage"),
     fluxus.WithMetricsCollector[Input, Output](collector),
 )
 
@@ -88,25 +88,25 @@ metricatedPipeline := fluxus.NewMetricatedPipeline(
 // Metricated FanOut
 metricatedFanOut := fluxus.NewMetricatedFanOut(
     fanOut,
-    fluxus.WithStageName[Input, []Output]("parallel-processing"),
+    fluxus.WithMetricsStageName[Input, []Output]("parallel-processing"),
 )
 
 // Metricated FanIn
 metricatedFanIn := fluxus.NewMetricatedFanIn(
     fanIn,
-    fluxus.WithStageName[[]Input, Output]("result-aggregation"),
+    fluxus.WithMetricsStageName[[]Input, Output]("result-aggregation"),
 )
 
 // Metricated Buffer
 metricatedBuffer := fluxus.NewMetricatedBuffer(
     buffer,
-    fluxus.WithStageName[[]Input, []Output]("batch-processor"),
+    fluxus.WithMetricsStageName[[]Input, []Output]("batch-processor"),
 )
 
 // Metricated Retry
 metricatedRetry := fluxus.NewMetricatedRetry(
     retry,
-    fluxus.WithStageName[Input, Output]("resilient-operation"),
+    fluxus.WithMetricsStageName[Input, Output]("resilient-operation"),
 )
 ```
 
@@ -208,7 +208,7 @@ Use the `TracedStage` wrapper to add tracing to any stage:
 // Create a traced stage wrapper
 traced := fluxus.NewTracedStage(
     stage,
-    fluxus.WithTracerName[Input, Output]("my-processing-stage"),
+    fluxus.WithTracerStageName[Input, Output]("my-processing-stage"),
     fluxus.WithTracerAttributes[Input, Output](
         attribute.String("service", "data-processor"),
         attribute.String("environment", "production"),
@@ -227,8 +227,11 @@ Fluxus provides specialized traced wrappers for specific stage types that collec
 // Traced FanOut
 tracedFanOut := fluxus.NewTracedFanOut(
     fanOut,
-    "parallel-processing",
-    attribute.String("operation", "data-transformation"),
+    fluxus.WithTracerStageName[Input, []Output]("parallel-processing"), // Assuming FanOut output is []Output
+    fluxus.WithTracerAttributes[Input, []Output](
+        attribute.String("operation", "data-transformation"),
+    ),
+    // Potentially fluxus.WithTracerProvider(...) if not default
 )
 
 // Traced FanIn
@@ -270,17 +273,21 @@ provider := tracesdk.NewTracerProvider(
     tracesdk.WithSampler(tracesdk.AlwaysSample()),
     tracesdk.WithBatcher(exporter),
 )
-tracer := provider.Tracer("custom-tracer")
 
 // Use with traced stages
 traced := fluxus.NewTracedStage(
     stage,
-    fluxus.WithTracerName[Input, Output]("my-stage"),
-    fluxus.WithTracer[Input, Output](tracer),
+    fluxus.WithTracerStageName[Input, Output]("my-stage"),
+    fluxus.WithTracerProvider[Input, Output](provider),
 )
 
-// Or with specialized tracers
-tracedFanOut.WithTracer(tracer)
+// Or with specialized tracers (New Example Style)
+tracedFanOut := fluxus.NewTracedFanOut(
+    fanOut,
+    fluxus.WithTracerStageName[Input, []Output]("parallel-processing"),
+    fluxus.WithTracerProvider[Input, []Output](provider), // Provider passed as option
+    // ... other options
+)
 ```
 
 ### Trace Propagation
@@ -338,7 +345,7 @@ allAttrs := append(commonAttrs, stageAttrs...)
 // Create traced stage with all attributes
 traced := fluxus.NewTracedStage(
     stage,
-    fluxus.WithTracerName[Input, Output]("transformation-stage"),
+    fluxus.WithTracerStageName[Input, Output]("transformation-stage"),
     fluxus.WithTracerAttributes[Input, Output](allAttrs...),
 )
 ```
@@ -354,14 +361,14 @@ baseStage := fluxus.StageFunc[Input, Output](/* ... */)
 // Add metrics
 metricated := fluxus.NewMetricatedStage(
     baseStage,
-    fluxus.WithStageName[Input, Output]("processing-stage"),
+    fluxus.WithMetricsStageName[Input, Output]("processing-stage"),
     fluxus.WithMetricsCollector[Input, Output](collector),
 )
 
 // Add tracing on top of metrics
 traced := fluxus.NewTracedStage(
     metricated,
-    fluxus.WithTracerName[Input, Output]("processing-stage"),
+    fluxus.WithTracerStageName[Input, Output]("processing-stage"),
     fluxus.WithTracerAttributes[Input, Output](
         attribute.String("service", "data-processor"),
         attribute.String("operation", "transform"),
@@ -465,14 +472,11 @@ otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
     propagation.Baggage{},
 ))
 
-// Create tracer
-tracer := provider.Tracer("fluxus-pipeline")
-
 // Use with Fluxus traced stages
 traced := fluxus.NewTracedStage(
     stage,
-    fluxus.WithTracerName[Input, Output]("data-transformation"),
-    fluxus.WithTracer[Input, Output](tracer),
+    fluxus.WithTracerStageName[Input, Output]("data-transformation"),
+    fluxus.WithTracerProvider[Input, Output](provider),
 )
 ```
 
@@ -488,12 +492,12 @@ const stageName = "order-processing"
 
 metricated := fluxus.NewMetricatedStage(
     stage,
-    fluxus.WithStageName[Input, Output](stageName),
+    fluxus.WithMetricsStageName[Input, Output](stageName),
 )
 
 traced := fluxus.NewTracedStage(
     metricated,
-    fluxus.WithTracerName[Input, Output](stageName),
+    fluxus.WithTracerStageName[Input, Output](stageName),
 )
 ```
 
