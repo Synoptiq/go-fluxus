@@ -45,6 +45,26 @@ func (d *DoubleStage) Process(_ context.Context, input int) (int, error) {
 stage := &DoubleStage{}
 ```
 
+### Starter and Stopper Stages
+
+Stages can optionally implement `Starter` and `Stopper` interfaces to manage resources:
+
+```go
+// Corrected example
+package fluxus
+import "context"
+
+type Starter interface {
+	Start(ctx context.Context) error
+}
+
+type Stopper interface {
+	Stop(ctx context.Context) error
+}
+```
+
+The pipeline will call these methods when you call `pipeline.Start` and `pipeline.Stop`.
+
 ### Chain
 
 `Chain` combines two stages where the output of the first becomes input to the second. This allows creating pipelines with stages that have different input and output types.
@@ -82,7 +102,7 @@ pipeline := fluxus.ChainMany[string, string](stage1, stage2, stage3)
 
 ### Pipeline
 
-A `Pipeline` wraps a stage (which can be a chained stage) and provides additional functionality like error handling.
+A `Pipeline` wraps a stage (which can be a chained stage) and provides additional functionality like error handling and lifecycle management.
 
 ```go
 // Create a pipeline with a chained stage
@@ -94,9 +114,37 @@ pipeline.WithErrorHandler(func(err error) error {
     return err
 })
 
+// Start the pipeline (if the contained stage implements Starter)
+if err := pipeline.Start(ctx); err != nil {
+    log.Fatalf("Failed to start pipeline: %v", err)
+}
+defer func() {
+    if stopErr := pipeline.Stop(ctx); stopErr != nil {
+        log.Printf("Error stopping pipeline: %v", stopErr)
+    }
+}()
+
 // Process input through the pipeline
 result, err := pipeline.Process(ctx, "input")
 ```
+
+### `Start` and `Stop`
+
+The `Start` and `Stop` methods manage the pipeline's lifecycle, particularly if the underlying stage has setup/teardown requirements.
+
+```go
+// Start the pipeline and any sub-stages implementing Starter
+if err := pipeline.Start(ctx); err != nil {
+    log.Fatalf("Failed to start pipeline: %v", err)
+}
+
+// Stop the pipeline and any sub-stages implementing Stopper
+if err := pipeline.Stop(ctx); err != nil {
+    log.Printf("Error stopping pipeline: %v", err)
+}
+```
+
+`Process` will return a `fluxus.ErrPipelineNotStarted` error if Start was not called.
 
 ## Error Handling
 
@@ -128,6 +176,8 @@ Fluxus provides specialized error types for different scenarios:
 - `MapItemError`: Error from a specific item in a Map operation
 - `FanOutError`: Contains errors from multiple failed stages in fan-out
 - `BufferError`: Provides details about batch processing failures
+- `PipelineConfigurationError` : Error in pipeline creation or validation
+- `PipelineLifecycleError` : Error from Start or Stop method.
 
 ## Context Handling
 

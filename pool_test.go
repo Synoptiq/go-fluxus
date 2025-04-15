@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/synoptiq/go-fluxus"
 )
 
@@ -312,6 +315,16 @@ func TestPooledStageInPipeline(t *testing.T) {
 
 	// Create a pipeline with the pooled stage
 	pipeline := fluxus.NewPipeline(pooledStage)
+	ctx := context.Background() // Define context
+
+	// --- FIX: Start the pipeline ---
+	err := pipeline.Start(ctx)
+	require.NoError(t, err, "Pipeline should start without error")
+	// --- FIX: Ensure pipeline is stopped ---
+	defer func() {
+		stopErr := pipeline.Stop(ctx)
+		assert.NoError(t, stopErr, "Pipeline should stop without error")
+	}()
 
 	// Process some inputs
 	inputs := []string{
@@ -323,9 +336,9 @@ func TestPooledStageInPipeline(t *testing.T) {
 	}
 
 	for _, input := range inputs {
-		result, err := pipeline.Process(context.Background(), input)
-		if err != nil {
-			t.Fatalf("Pipeline processing error: %v", err)
+		result, pipelineProcessErr := pipeline.Process(context.Background(), input)
+		if pipelineProcessErr != nil {
+			t.Fatalf("Pipeline processing error: %v", pipelineProcessErr)
 		}
 
 		expected := strings.ToUpper(input)
@@ -394,6 +407,16 @@ func TestPooledBufferInPipeline(t *testing.T) {
 
 	// Create a pipeline
 	pipeline := fluxus.NewPipeline(fullStage)
+	ctx := context.Background() // Define context
+
+	// --- FIX: Start the pipeline ---
+	err := pipeline.Start(ctx)
+	require.NoError(t, err, "Pipeline should start without error")
+	// --- FIX: Ensure pipeline is stopped ---
+	defer func() {
+		stopErr := pipeline.Stop(ctx)
+		assert.NoError(t, stopErr, "Pipeline should stop without error")
+	}()
 
 	// Process a batch of integers
 	inputs := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
@@ -402,9 +425,9 @@ func TestPooledBufferInPipeline(t *testing.T) {
 	processingStage := fluxus.StageFunc[[]int, []string](func(ctx context.Context, inputs []int) ([]string, error) {
 		var results []string
 		for _, input := range inputs {
-			result, err := pipeline.Process(ctx, input)
-			if err != nil {
-				return nil, err
+			result, pipelineProcessErr := pipeline.Process(ctx, input)
+			if pipelineProcessErr != nil {
+				return nil, pipelineProcessErr
 			}
 			results = append(results, result...)
 		}
@@ -412,7 +435,6 @@ func TestPooledBufferInPipeline(t *testing.T) {
 	})
 
 	// Process
-	ctx := context.Background()
 	results, err := processingStage.Process(ctx, inputs)
 	if err != nil {
 		t.Fatalf("Pipeline processing error: %v", err)
