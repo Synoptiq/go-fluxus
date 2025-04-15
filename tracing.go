@@ -5,11 +5,30 @@ import (
 	"fmt"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
+
+// TracerProvider is an interface wrapper around otel's TracerProvider.
+// Allows for custom implementations or defaults.
+type TracerProvider interface {
+	Tracer(name string, options ...trace.TracerOption) trace.Tracer
+}
+
+// NoopTracerProvider provides a tracer that does nothing.
+type NoopTracerProvider struct{}
+
+func (p *NoopTracerProvider) Tracer(name string, options ...trace.TracerOption) trace.Tracer {
+	return noop.NewTracerProvider().Tracer(name, options...)
+}
+
+// DefaultTracerProvider is the default used when none is specified.
+var DefaultTracerProvider TracerProvider = &NoopTracerProvider{}
+
+// Ensure NoopTracerProvider implements TracerProvider
+var _ TracerProvider = (*NoopTracerProvider)(nil)
 
 // TracedStage wraps any Stage with OpenTelemetry tracing
 type TracedStage[I, O any] struct {
@@ -22,6 +41,9 @@ type TracedStage[I, O any] struct {
 	// Tracer to use
 	tracer trace.Tracer
 
+	// Provider to use for creating spans
+	tracerProvider TracerProvider
+
 	// Attributes to add to spans
 	attributes []attribute.KeyValue
 }
@@ -29,17 +51,21 @@ type TracedStage[I, O any] struct {
 // TracedStageOption is a function that configures a TracedStage.
 type TracedStageOption[I, O any] func(*TracedStage[I, O])
 
-// WithTracerName sets a custom name for the TracedStage.
-func WithTracerName[I, O any](name string) TracedStageOption[I, O] {
+// WithTracerStageName sets a custom name for the TracedStage.
+func WithTracerStageName[I, O any](name string) TracedStageOption[I, O] {
 	return func(ts *TracedStage[I, O]) {
 		ts.name = name
 	}
 }
 
-// WithTracer sets a custom tracer for the TracedStage.
-func WithTracer[I, O any](tracer trace.Tracer) TracedStageOption[I, O] {
+// WithTracerProvider sets a custom tracer provider for the TracedStage.
+func WithTracerProvider[I, O any](tracer TracerProvider) TracedStageOption[I, O] {
 	return func(ts *TracedStage[I, O]) {
-		ts.tracer = tracer
+		if tracer != nil {
+			ts.tracerProvider = tracer
+		} else {
+			ts.tracerProvider = DefaultTracerProvider
+		}
 	}
 }
 
@@ -56,16 +82,19 @@ func NewTracedStage[I, O any](
 	options ...TracedStageOption[I, O],
 ) *TracedStage[I, O] {
 	ts := &TracedStage[I, O]{
-		stage:      stage,
-		name:       "fluxus.stage",
-		tracer:     otel.Tracer("github.com/synoptiq/go-fluxus"),
-		attributes: []attribute.KeyValue{},
+		stage:          stage,
+		name:           "traced_stage",
+		tracer:         nil,
+		tracerProvider: DefaultTracerProvider,
+		attributes:     []attribute.KeyValue{},
 	}
 
 	// Apply options
 	for _, option := range options {
 		option(ts)
 	}
+
+	ts.tracer = ts.tracerProvider.Tracer(fmt.Sprintf("fluxus/stage/%s", ts.name))
 
 	return ts
 }
@@ -88,7 +117,7 @@ func (ts *TracedStage[I, O]) Process(ctx context.Context, input I) (O, error) {
 
 	// Record duration
 	duration := time.Since(startTime)
-	span.SetAttributes(attribute.Float64("duration_ms", float64(duration.Milliseconds())))
+	span.SetAttributes(attribute.Int64("fluxus.stage.duration_ms", duration.Milliseconds()))
 
 	// Record error if any
 	if err != nil {
@@ -105,30 +134,46 @@ func (ts *TracedStage[I, O]) Process(ctx context.Context, input I) (O, error) {
 
 // TracedFanOutStage wraps a FanOut with additional fan-out specific tracing
 type TracedFanOutStage[I, O any] struct {
-	stage      *FanOut[I, O]
-	name       string
-	tracer     trace.Tracer
-	attributes []attribute.KeyValue
+	stage          *FanOut[I, O]
+	name           string
+	tracer         trace.Tracer
+	tracerProvider TracerProvider
+	attributes     []attribute.KeyValue
 }
 
 // NewTracedFanOut creates a traced wrapper around a FanOut stage.
 func NewTracedFanOut[I, O any](
 	fanOut *FanOut[I, O],
-	name string,
-	attributes ...attribute.KeyValue,
+	options ...TracedStageOption[I, []O], // Accept options instead
 ) Stage[I, []O] {
-	return &TracedFanOutStage[I, O]{
-		stage:      fanOut,
-		name:       name,
-		tracer:     otel.Tracer("github.com/synoptiq/go-fluxus"),
-		attributes: attributes,
+	if fanOut == nil {
+		panic("fluxus.NewTracedFanOut: fanOut cannot be nil") // Add nil check
 	}
-}
 
-// WithTracer sets a custom tracer for the traced fan-out stage.
-func (ts *TracedFanOutStage[I, O]) WithTracer(tracer trace.Tracer) *TracedFanOutStage[I, O] {
-	ts.tracer = tracer
-	return ts
+	// Create a proxy for handling options
+	ts := &TracedStage[I, []O]{
+		stage:          fanOut,
+		name:           "traced_fan_out", // Default name
+		tracer:         nil,
+		tracerProvider: DefaultTracerProvider,
+		attributes:     []attribute.KeyValue{},
+	}
+
+	for _, option := range options {
+		// Apply the generic option to the proxy
+		option(ts)
+	}
+
+	// create the tracer *after* all options (especially provider) have been applied
+	ts.tracer = ts.tracerProvider.Tracer(fmt.Sprintf("fluxus/stage/%s", ts.name))
+
+	return &TracedFanOutStage[I, O]{
+		stage:          fanOut,
+		name:           ts.name,
+		tracer:         ts.tracer,
+		tracerProvider: ts.tracerProvider,
+		attributes:     ts.attributes,
+	}
 }
 
 // Process implements the Stage interface for TracedFanOutStage
@@ -140,8 +185,8 @@ func (ts *TracedFanOutStage[I, O]) Process(ctx context.Context, input I) ([]O, e
 		trace.WithAttributes(
 			append(
 				ts.attributes,
-				attribute.Int("num_stages", len(ts.stage.stages)),
-				attribute.Int("concurrency", ts.stage.concurrency),
+				attribute.Int("fluxus.stage.num_stages", len(ts.stage.stages)),
+				attribute.Int("fluxus.stage.concurrency", ts.stage.concurrency),
 			)...,
 		),
 	)
@@ -155,7 +200,7 @@ func (ts *TracedFanOutStage[I, O]) Process(ctx context.Context, input I) ([]O, e
 
 	// Record duration
 	duration := time.Since(startTime)
-	span.SetAttributes(attribute.Float64("duration_ms", float64(duration.Milliseconds())))
+	span.SetAttributes(attribute.Int64("fluxus.stage.duration_ms", duration.Milliseconds()))
 
 	// Record error if any
 	if err != nil {
@@ -163,7 +208,7 @@ func (ts *TracedFanOutStage[I, O]) Process(ctx context.Context, input I) ([]O, e
 		span.SetStatus(codes.Error, err.Error())
 	} else {
 		span.SetStatus(codes.Ok, "")
-		span.SetAttributes(attribute.Int("num_results", len(outputs)))
+		span.SetAttributes(attribute.Int("fluxus.stage.num_results", len(outputs)))
 	}
 
 	return outputs, err
@@ -171,30 +216,46 @@ func (ts *TracedFanOutStage[I, O]) Process(ctx context.Context, input I) ([]O, e
 
 // TracedFanInStage wraps a FanIn with additional fan-in specific tracing
 type TracedFanInStage[I, O any] struct {
-	stage      *FanIn[I, O]
-	name       string
-	tracer     trace.Tracer
-	attributes []attribute.KeyValue
+	stage          *FanIn[I, O]
+	name           string
+	tracer         trace.Tracer
+	tracerProvider TracerProvider
+	attributes     []attribute.KeyValue
 }
 
 // NewTracedFanIn creates a traced wrapper around a FanIn stage.
 func NewTracedFanIn[I, O any](
 	fanIn *FanIn[I, O],
-	name string,
-	attributes ...attribute.KeyValue,
+	options ...TracedStageOption[[]I, O], // Accept options instead
 ) Stage[[]I, O] {
-	return &TracedFanInStage[I, O]{
-		stage:      fanIn,
-		name:       name,
-		tracer:     otel.Tracer("github.com/synoptiq/go-fluxus"),
-		attributes: attributes,
+	if fanIn == nil {
+		panic("fluxus.NewTracedFanIn: fanIn cannot be nil") // Add nil check
 	}
-}
 
-// WithTracer sets a custom tracer for the traced fan-in stage.
-func (ts *TracedFanInStage[I, O]) WithTracer(tracer trace.Tracer) *TracedFanInStage[I, O] {
-	ts.tracer = tracer
-	return ts
+	// Create a proxy for handling options
+	ts := &TracedStage[[]I, O]{
+		stage:          fanIn,
+		name:           "traced_fan_in", // Default name
+		tracer:         nil,
+		tracerProvider: DefaultTracerProvider,
+		attributes:     []attribute.KeyValue{},
+	}
+
+	for _, option := range options {
+		// Apply the generic option to the proxy
+		option(ts)
+	}
+
+	// create the tracer *after* all options (especially provider) have been applied
+	ts.tracer = ts.tracerProvider.Tracer(fmt.Sprintf("fluxus/stage/%s", ts.name))
+
+	return &TracedFanInStage[I, O]{
+		stage:          fanIn,
+		name:           ts.name,
+		tracer:         ts.tracer,
+		tracerProvider: ts.tracerProvider,
+		attributes:     ts.attributes,
+	}
 }
 
 // Process implements the Stage interface for TracedFanInStage
@@ -206,7 +267,7 @@ func (ts *TracedFanInStage[I, O]) Process(ctx context.Context, inputs []I) (O, e
 		trace.WithAttributes(
 			append(
 				ts.attributes,
-				attribute.Int("num_inputs", len(inputs)),
+				attribute.Int("fluxus.stage.num_inputs", len(inputs)),
 			)...,
 		),
 	)
@@ -220,7 +281,7 @@ func (ts *TracedFanInStage[I, O]) Process(ctx context.Context, inputs []I) (O, e
 
 	// Record duration
 	duration := time.Since(startTime)
-	span.SetAttributes(attribute.Float64("duration_ms", float64(duration.Milliseconds())))
+	span.SetAttributes(attribute.Int64("fluxus.stage.duration_ms", duration.Milliseconds()))
 
 	// Record error if any
 	if err != nil {
@@ -235,30 +296,46 @@ func (ts *TracedFanInStage[I, O]) Process(ctx context.Context, inputs []I) (O, e
 
 // TracedBufferStage wraps a Buffer with buffer-specific tracing
 type TracedBufferStage[I, O any] struct {
-	stage      *Buffer[I, O]
-	name       string
-	tracer     trace.Tracer
-	attributes []attribute.KeyValue
+	stage          *Buffer[I, O]
+	name           string
+	tracer         trace.Tracer
+	tracerProvider TracerProvider
+	attributes     []attribute.KeyValue
 }
 
 // NewTracedBuffer creates a traced wrapper around a Buffer stage.
 func NewTracedBuffer[I, O any](
 	buffer *Buffer[I, O],
-	name string,
-	attributes ...attribute.KeyValue,
+	options ...TracedStageOption[[]I, []O], // Accept options instead
 ) Stage[[]I, []O] {
-	return &TracedBufferStage[I, O]{
-		stage:      buffer,
-		name:       name,
-		tracer:     otel.Tracer("github.com/synoptiq/go-fluxus"),
-		attributes: attributes,
+	if buffer == nil {
+		panic("fluxus.NewTracedBuffer: buffer cannot be nil") // Add nil check
 	}
-}
 
-// WithTracer sets a custom tracer for the traced buffer stage.
-func (ts *TracedBufferStage[I, O]) WithTracer(tracer trace.Tracer) *TracedBufferStage[I, O] {
-	ts.tracer = tracer
-	return ts
+	// Create a proxy for handling options
+	ts := &TracedStage[[]I, []O]{
+		stage:          buffer,
+		name:           "traced_buffer", // Default name
+		tracer:         nil,
+		tracerProvider: DefaultTracerProvider,
+		attributes:     []attribute.KeyValue{},
+	}
+
+	for _, option := range options {
+		// Apply the generic option to the proxy
+		option(ts)
+	}
+
+	// create the tracer *after* all options (especially provider) have been applied
+	ts.tracer = ts.tracerProvider.Tracer(fmt.Sprintf("fluxus/stage/%s", ts.name))
+
+	return &TracedBufferStage[I, O]{
+		stage:          buffer,
+		name:           ts.name,
+		tracer:         ts.tracer,
+		tracerProvider: ts.tracerProvider,
+		attributes:     ts.attributes,
+	}
 }
 
 // Process implements the Stage interface for TracedBufferStage
@@ -270,8 +347,8 @@ func (ts *TracedBufferStage[I, O]) Process(ctx context.Context, inputs []I) ([]O
 		trace.WithAttributes(
 			append(
 				ts.attributes,
-				attribute.Int("num_inputs", len(inputs)),
-				attribute.Int("batch_size", ts.stage.batchSize),
+				attribute.Int("fluxus.stage.num_inputs", len(inputs)),
+				attribute.Int("fluxus.stage.batch_size", ts.stage.batchSize),
 			)...,
 		),
 	)
@@ -286,8 +363,8 @@ func (ts *TracedBufferStage[I, O]) Process(ctx context.Context, inputs []I) ([]O
 	// Record duration
 	duration := time.Since(startTime)
 	span.SetAttributes(
-		attribute.Float64("duration_ms", float64(duration.Milliseconds())),
-		attribute.Int("num_outputs", len(outputs)),
+		attribute.Int64("fluxus.stage.duration_ms", duration.Milliseconds()),
+		attribute.Int("fluxus.stage.num_outputs", len(outputs)),
 	)
 
 	// Record error if any
@@ -303,30 +380,46 @@ func (ts *TracedBufferStage[I, O]) Process(ctx context.Context, inputs []I) ([]O
 
 // TracedRetryStage wraps a Retry with additional retry-specific tracing
 type TracedRetryStage[I, O any] struct {
-	stage      *Retry[I, O]
-	name       string
-	tracer     trace.Tracer
-	attributes []attribute.KeyValue
+	stage          *Retry[I, O]
+	name           string
+	tracer         trace.Tracer
+	tracerProvider TracerProvider
+	attributes     []attribute.KeyValue
 }
 
 // NewTracedRetry creates a traced wrapper around a Retry stage.
 func NewTracedRetry[I, O any](
 	retry *Retry[I, O],
-	name string,
-	attributes ...attribute.KeyValue,
+	options ...TracedStageOption[I, O], // Accept options instead
 ) Stage[I, O] {
-	return &TracedRetryStage[I, O]{
-		stage:      retry,
-		name:       name,
-		tracer:     otel.Tracer("github.com/synoptiq/go-fluxus"),
-		attributes: attributes,
+	if retry == nil {
+		panic("fluxus.NewTracedRetry: retry cannot be nil") // Add nil check
 	}
-}
 
-// WithTracer sets a custom tracer for the traced retry stage.
-func (ts *TracedRetryStage[I, O]) WithTracer(tracer trace.Tracer) *TracedRetryStage[I, O] {
-	ts.tracer = tracer
-	return ts
+	// Create a proxy for handling options
+	ts := &TracedStage[I, O]{
+		stage:          retry,
+		name:           "traced_retry", // Default name
+		tracer:         nil,
+		tracerProvider: DefaultTracerProvider,
+		attributes:     []attribute.KeyValue{},
+	}
+
+	for _, option := range options {
+		// Apply the generic option to the proxy
+		option(ts)
+	}
+
+	// create the tracer *after* all options (especially provider) have been applied
+	ts.tracer = ts.tracerProvider.Tracer(fmt.Sprintf("fluxus/stage/%s", ts.name))
+
+	return &TracedRetryStage[I, O]{
+		stage:          retry,
+		name:           ts.name,
+		tracer:         ts.tracer,
+		tracerProvider: ts.tracerProvider,
+		attributes:     ts.attributes,
+	}
 }
 
 // Process implements the Stage interface for TracedRetryStage
@@ -338,7 +431,7 @@ func (ts *TracedRetryStage[I, O]) Process(ctx context.Context, input I) (O, erro
 		trace.WithAttributes(
 			append(
 				ts.attributes,
-				attribute.Int("max_attempts", ts.stage.maxAttempts),
+				attribute.Int("fluxus.stage.max_attempts", ts.stage.maxAttempts),
 			)...,
 		),
 	)
@@ -358,7 +451,7 @@ func (ts *TracedRetryStage[I, O]) Process(ctx context.Context, input I) (O, erro
 		// Create a child span for the retry attempt
 		attemptCtx, attemptSpan := ts.tracer.Start(
 			ctx,
-			fmt.Sprintf("%s.attempt.%d", ts.name, attemptCount),
+			fmt.Sprintf("fluxus.stage.%s.attempt.%d", ts.name, attemptCount),
 			trace.WithAttributes(
 				attribute.Int("attempt", attemptCount),
 			),
@@ -371,10 +464,10 @@ func (ts *TracedRetryStage[I, O]) Process(ctx context.Context, input I) (O, erro
 		if err != nil {
 			attemptSpan.RecordError(err)
 			attemptSpan.SetStatus(codes.Error, err.Error())
-			attemptSpan.SetAttributes(attribute.Bool("success", false))
+			attemptSpan.SetAttributes(attribute.Bool("fluxus.stage.success", false))
 		} else {
 			attemptSpan.SetStatus(codes.Ok, "")
-			attemptSpan.SetAttributes(attribute.Bool("success", true))
+			attemptSpan.SetAttributes(attribute.Bool("fluxus.stage.success", true))
 		}
 
 		// End the attempt span
@@ -395,11 +488,11 @@ func (ts *TracedRetryStage[I, O]) Process(ctx context.Context, input I) (O, erro
 	// Restore the original stage
 	ts.stage.stage = originalStage
 
-	// Record duration and attempts
+	// Record duration and attemptss
 	duration := time.Since(startTime)
 	span.SetAttributes(
-		attribute.Float64("duration_ms", float64(duration.Milliseconds())),
-		attribute.Int("attempts", attemptCount),
+		attribute.Int64("fluxus.stage.duration_ms", duration.Milliseconds()),
+		attribute.Int("fluxus.stage.attempts", attemptCount),
 	)
 
 	// Record error if any
@@ -415,30 +508,46 @@ func (ts *TracedRetryStage[I, O]) Process(ctx context.Context, input I) (O, erro
 
 // TracedPipelineStage wraps a Pipeline with pipeline-specific tracing
 type TracedPipelineStage[I, O any] struct {
-	stage      *Pipeline[I, O]
-	name       string
-	tracer     trace.Tracer
-	attributes []attribute.KeyValue
+	stage          *Pipeline[I, O]
+	name           string
+	tracer         trace.Tracer
+	tracerProvider TracerProvider
+	attributes     []attribute.KeyValue
 }
 
 // NewTracedPipeline creates a traced wrapper around a Pipeline stage.
 func NewTracedPipeline[I, O any](
 	pipeline *Pipeline[I, O],
-	name string,
-	attributes ...attribute.KeyValue,
+	options ...TracedStageOption[I, O], // Accept options instead
 ) Stage[I, O] {
-	return &TracedPipelineStage[I, O]{
-		stage:      pipeline,
-		name:       name,
-		tracer:     otel.Tracer("github.com/synoptiq/go-fluxus"),
-		attributes: attributes,
+	if pipeline == nil {
+		panic("fluxus.NewTracedPipeline: pipeline cannot be nil") // Add nil check
 	}
-}
 
-// WithTracer sets a custom tracer for the traced pipeline stage.
-func (ts *TracedPipelineStage[I, O]) WithTracer(tracer trace.Tracer) *TracedPipelineStage[I, O] {
-	ts.tracer = tracer
-	return ts
+	// Create a proxy for handling options
+	ts := &TracedStage[I, O]{
+		stage:          pipeline,
+		name:           "traced_pipeline", // Default name
+		tracer:         nil,
+		tracerProvider: DefaultTracerProvider,
+		attributes:     []attribute.KeyValue{},
+	}
+
+	for _, option := range options {
+		// Apply the generic option to the proxy
+		option(ts)
+	}
+
+	// create the tracer *after* all options (especially provider) have been applied
+	ts.tracer = ts.tracerProvider.Tracer(fmt.Sprintf("fluxus/stage/%s", ts.name))
+
+	return &TracedPipelineStage[I, O]{
+		stage:          pipeline,
+		name:           ts.name,
+		tracer:         ts.tracer,
+		tracerProvider: ts.tracerProvider,
+		attributes:     ts.attributes,
+	}
 }
 
 // Process implements the Stage interface for TracedPipelineStage
@@ -459,7 +568,7 @@ func (ts *TracedPipelineStage[I, O]) Process(ctx context.Context, input I) (O, e
 
 	// Record duration
 	duration := time.Since(startTime)
-	span.SetAttributes(attribute.Float64("duration_ms", float64(duration.Milliseconds())))
+	span.SetAttributes(attribute.Int64("fluxus.pipeline.duration_ms", duration.Milliseconds()))
 
 	// Record error if any
 	if err != nil {
