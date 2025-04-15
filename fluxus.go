@@ -15,6 +15,22 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// Starter defines an optional interface for stages requiring initialization before processing begins.
+// This is useful for stages that need to acquire resources (like connections) or start background tasks.
+type Starter interface {
+	// Start initializes the stage. It may block until initialization is complete.
+	// The context can be used for cancellation or timeouts during startup.
+	Start(ctx context.Context) error
+}
+
+// Stopper defines an optional interface for stages requiring graceful shutdown.
+// This is useful for stages that need to release resources, flush buffers, or stop background tasks.
+type Stopper interface {
+	// Stop signals the stage to shut down gracefully. It may block until shutdown is complete.
+	// The context can be used to enforce a timeout or cancellation for the shutdown process itself.
+	Stop(ctx context.Context) error
+}
+
 // ErrorHandlingStrategy defines how item-level errors are handled in a stream adapter.
 type ErrorHandlingStrategy int
 
