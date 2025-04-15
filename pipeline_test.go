@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/synoptiq/go-fluxus"
 )
 
@@ -488,13 +489,15 @@ func TestStreamPipelineMultipleStages(t *testing.T) {
 	})
 
 	// Stage 3: []string -> map[string]int (count occurrences)
-	countOccurrences := fluxus.StageFunc[[]string, map[string]int](func(_ context.Context, input []string) (map[string]int, error) {
-		result := make(map[string]int)
-		for _, s := range input {
-			result[s]++
-		}
-		return result, nil
-	})
+	countOccurrences := fluxus.StageFunc[[]string, map[string]int](
+		func(_ context.Context, input []string) (map[string]int, error) {
+			result := make(map[string]int)
+			for _, s := range input {
+				result[s]++
+			}
+			return result, nil
+		},
+	)
 
 	// Build pipeline: int -> string -> []string -> map[string]int
 	builder := fluxus.NewStreamPipeline[int](
@@ -959,14 +962,20 @@ func TestStreamAdapterBackpressure(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create the adapter with specified concurrency
-			fastAdapter := fluxus.NewStreamAdapter(fastProducer,
+			fastAdapter := fluxus.NewStreamAdapter(
+				fastProducer,
 				fluxus.WithAdapterConcurrency[int, int](1), // Always sequential for producer
-				fluxus.WithAdapterLogger[int, int](log.New(os.Stdout, fmt.Sprintf("Producer-%s: ", tc.name), log.LstdFlags)),
+				fluxus.WithAdapterLogger[int, int](
+					log.New(os.Stdout, fmt.Sprintf("Producer-%s: ", tc.name), log.LstdFlags),
+				),
 			)
 
-			slowAdapter := fluxus.NewStreamAdapter(slowConsumer,
+			slowAdapter := fluxus.NewStreamAdapter(
+				slowConsumer,
 				fluxus.WithAdapterConcurrency[int, int](tc.concurrency), // Varying concurrency for consumer
-				fluxus.WithAdapterLogger[int, int](log.New(os.Stdout, fmt.Sprintf("Consumer-%s: ", tc.name), log.LstdFlags)),
+				fluxus.WithAdapterLogger[int, int](
+					log.New(os.Stdout, fmt.Sprintf("Consumer-%s: ", tc.name), log.LstdFlags),
+				),
 			)
 
 			// Create channels
@@ -1102,7 +1111,9 @@ func TestStreamPipelineRobustness(t *testing.T) {
 			// Create adapter options
 			adapterOpts := []fluxus.StreamAdapterOption[int, int]{
 				fluxus.WithAdapterErrorStrategy[int, int](tc.strategy),
-				fluxus.WithAdapterLogger[int, int](log.New(os.Stdout, fmt.Sprintf("Robust-%s: ", tc.name), log.LstdFlags)),
+				fluxus.WithAdapterLogger[int, int](
+					log.New(os.Stdout, fmt.Sprintf("Robust-%s: ", tc.name), log.LstdFlags),
+				),
 			}
 
 			if tc.strategy == fluxus.SendToErrorChannel {
@@ -1111,7 +1122,9 @@ func TestStreamPipelineRobustness(t *testing.T) {
 
 			// Build the pipeline
 			builder := fluxus.NewStreamPipeline[int](
-				fluxus.WithStreamLogger(log.New(os.Stdout, fmt.Sprintf("Robust-%s-Pipeline: ", tc.name), log.LstdFlags)),
+				fluxus.WithStreamLogger(
+					log.New(os.Stdout, fmt.Sprintf("Robust-%s-Pipeline: ", tc.name), log.LstdFlags),
+				),
 			)
 			b2 := fluxus.AddStage(builder, "flaky_stage", flakyStage, adapterOpts...)
 			pipeline, err := fluxus.Finalize(b2)
@@ -1457,13 +1470,15 @@ func BenchmarkStreamPipelineDataTypes(b *testing.B) {
 
 	// Use generics to create a function that processes any type
 	createStructStage := func() fluxus.Stage[largeStruct, largeStruct] {
-		return fluxus.StageFunc[largeStruct, largeStruct](func(_ context.Context, input largeStruct) (largeStruct, error) {
-			// Do some work on the struct
-			result := input
-			result.ID *= 2
-			result.Name = strings.ToUpper(input.Name)
-			return result, nil
-		})
+		return fluxus.StageFunc[largeStruct, largeStruct](
+			func(_ context.Context, input largeStruct) (largeStruct, error) {
+				// Do some work on the struct
+				result := input
+				result.ID *= 2
+				result.Name = strings.ToUpper(input.Name)
+				return result, nil
+			},
+		)
 	}
 
 	structStage := createStructStage()

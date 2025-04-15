@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/synoptiq/go-fluxus"
 )
 
@@ -458,7 +459,12 @@ func TestRouterWithConcurrencyLimit(t *testing.T) {
 	assert.Equal(t, int32(2), maxConcurrent.Load(), "Max concurrency should be limited to 2")
 
 	// With 4 tasks and concurrency 2, duration should be roughly 2 * stage duration
-	assert.True(t, duration > 35*time.Millisecond && duration < 60*time.Millisecond, "Duration %v not consistent with concurrency limit 2", duration)
+	assert.True(
+		t,
+		duration > 35*time.Millisecond && duration < 60*time.Millisecond,
+		"Duration %v not consistent with concurrency limit 2",
+		duration,
+	)
 }
 
 // TestRouterWithErrorHandler tests the custom error handler.
@@ -732,7 +738,12 @@ func TestJoinByKeyFuncError(t *testing.T) {
 
 	require.Error(t, err)
 	require.ErrorIs(t, err, expectedErr, "Error chain should contain the original keyFunc error")
-	require.Contains(t, err.Error(), "JoinByKey keyFunc error for item at index 2", "Error message should provide context")
+	require.Contains(
+		t,
+		err.Error(),
+		"JoinByKey keyFunc error for item at index 2",
+		"Error message should provide context",
+	)
 }
 
 // TestJoinByKeyContextCancellation tests cancellation during processing.

@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/synoptiq/go-fluxus"
 )
 
@@ -1201,7 +1202,10 @@ func wordCountMapper(ctx context.Context, line string) (fluxus.KeyValue[string, 
 }
 
 // Simple word count reducer: sums values for a key
-func wordCountReducer(ctx context.Context, input fluxus.ReduceInput[string, int]) (fluxus.KeyValue[string, int], error) {
+func wordCountReducer(
+	ctx context.Context,
+	input fluxus.ReduceInput[string, int],
+) (fluxus.KeyValue[string, int], error) {
 	// Simulate some work
 	select {
 	case <-time.After(1 * time.Millisecond):
@@ -1367,7 +1371,12 @@ func TestMapReduceContextCancellationMapPhase(t *testing.T) {
 	assert.Nil(t, results)
 	// The error could be context.DeadlineExceeded directly or wrapped by map/shuffle phase error
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.Less(t, duration, cancelTime+50*time.Millisecond, "Should fail quickly after cancellation") // Allow some buffer
+	assert.Less(
+		t,
+		duration,
+		cancelTime+50*time.Millisecond,
+		"Should fail quickly after cancellation",
+	) // Allow some buffer
 }
 
 // TestMapReduceContextCancellationReducePhase tests cancellation during the reduce phase.
@@ -1403,7 +1412,12 @@ func TestMapReduceContextCancellationReducePhase(t *testing.T) {
 	assert.Nil(t, results)
 	// The error could be context.DeadlineExceeded directly or wrapped by reduce phase error
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.Less(t, duration, cancelTime+50*time.Millisecond, "Should fail quickly after cancellation") // Allow some buffer
+	assert.Less(
+		t,
+		duration,
+		cancelTime+50*time.Millisecond,
+		"Should fail quickly after cancellation",
+	) // Allow some buffer
 }
 
 // BenchmarkMapReduce benchmarks the MapReduce stage with varying parallelism.

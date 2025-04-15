@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/synoptiq/go-fluxus"
 )
 
@@ -69,7 +70,11 @@ func (s *mockExternalService) CallCount() int32 {
 
 // --- Mock Stage Function for Retry ---
 // Simpler mock just focusing on attempt-based failure
-func newRetryMockStage(attemptsToSucceed int, failWithError error, delay time.Duration) fluxus.StageFunc[string, string] {
+func newRetryMockStage(
+	attemptsToSucceed int,
+	failWithError error,
+	delay time.Duration,
+) fluxus.StageFunc[string, string] {
 	var callCount atomic.Int32
 	return func(ctx context.Context, input string) (string, error) {
 		count := callCount.Add(1)
@@ -228,7 +233,12 @@ func TestCircuitBreakerRecovery(t *testing.T) {
 	assert.Equal(t, "processed: half-open-attempt-1", result1)
 
 	// 5. NOW check the state. It should be HalfOpen because successThreshold is 2.
-	require.Equal(t, fluxus.CircuitHalfOpen, circuitBreaker.State(), "Circuit should be half-open after first successful attempt")
+	require.Equal(
+		t,
+		fluxus.CircuitHalfOpen,
+		circuitBreaker.State(),
+		"Circuit should be half-open after first successful attempt",
+	)
 
 	// 6. Make the second successful request in HalfOpen state.
 	result2, err2 := circuitBreaker.Process(ctx, "half-open-attempt-2")
@@ -236,7 +246,12 @@ func TestCircuitBreakerRecovery(t *testing.T) {
 	assert.Equal(t, "processed: half-open-attempt-2", result2)
 
 	// 7. Verify circuit is now closed because successThreshold (2) is met.
-	require.Equal(t, fluxus.CircuitClosed, circuitBreaker.State(), "Circuit should close after meeting success threshold")
+	require.Equal(
+		t,
+		fluxus.CircuitClosed,
+		circuitBreaker.State(),
+		"Circuit should close after meeting success threshold",
+	)
 
 	// 8. Subsequent requests should also succeed in Closed state.
 	result3, err3 := circuitBreaker.Process(ctx, "post-recovery-input")
@@ -274,7 +289,12 @@ func TestCircuitBreakerHalfOpenFailure(t *testing.T) {
 	require.ErrorIs(t, err, forcedErr, "Expected the specific forced error") // Check it's the underlying error
 
 	// 5. Verify circuit is now Open again because the half-open attempt failed.
-	require.Equal(t, fluxus.CircuitOpen, circuitBreaker.State(), "Circuit should re-open after failed half-open request")
+	require.Equal(
+		t,
+		fluxus.CircuitOpen,
+		circuitBreaker.State(),
+		"Circuit should re-open after failed half-open request",
+	)
 
 	// 6. Verify it returns ErrCircuitOpen immediately again
 	_, err = circuitBreaker.Process(ctx, "fail-immediate-again")
@@ -327,15 +347,29 @@ func TestCircuitBreakerConcurrency(t *testing.T) {
 	// Assertions: These are harder to predict exactly due to concurrency races,
 	// but we can check for reasonable outcomes.
 	assert.GreaterOrEqual(t, totalErrors.Load(), int64(failureThreshold), "Should have at least threshold errors")
-	assert.LessOrEqual(t, totalErrors.Load(), int64(concurrencyLevel*requestsPerGoroutine), "Errors cannot exceed total requests")
+	assert.LessOrEqual(
+		t,
+		totalErrors.Load(),
+		int64(concurrencyLevel*requestsPerGoroutine),
+		"Errors cannot exceed total requests",
+	)
 
 	// Check final state - it might be Closed if recovery happened, or Open/HalfOpen if still failing/recovering
 	finalState := circuitBreaker.State()
-	assert.Contains(t, []fluxus.CircuitBreakerState{fluxus.CircuitClosed, fluxus.CircuitOpen, fluxus.CircuitHalfOpen}, finalState, "Final state is unexpected")
+	assert.Contains(
+		t,
+		[]fluxus.CircuitBreakerState{fluxus.CircuitClosed, fluxus.CircuitOpen, fluxus.CircuitHalfOpen},
+		finalState,
+		"Final state is unexpected",
+	)
 
 	// If many errors occurred, a good portion should be ErrCircuitOpen
 	if totalErrors.Load() > int64(failureThreshold*2) { // Heuristic: if significantly more errors than threshold
-		assert.Positive(t, circuitOpenErrors.Load(), "Expected some ErrCircuitOpen errors if many total errors occurred")
+		assert.Positive(
+			t,
+			circuitOpenErrors.Load(),
+			"Expected some ErrCircuitOpen errors if many total errors occurred",
+		)
 	}
 }
 
@@ -358,7 +392,12 @@ func TestCircuitBreakerContextCancellation(t *testing.T) {
 
 		require.Error(t, err, "Expected an error due to context cancellation")
 		require.ErrorIs(t, err, context.DeadlineExceeded, "Expected context deadline exceeded error")
-		assert.Equal(t, fluxus.CircuitClosed, circuitBreaker.State(), "Circuit should remain closed on context cancellation")
+		assert.Equal(
+			t,
+			fluxus.CircuitClosed,
+			circuitBreaker.State(),
+			"Circuit should remain closed on context cancellation",
+		)
 		// Verify failure count didn't increase (assuming context errors don't count)
 		// This requires access to internal state or specific error handling in CB implementation
 		// For now, we just check the state.
@@ -618,7 +657,11 @@ func TestRetryContextCancellationDuringBackoff(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded, "Expected context deadline exceeded error")
 	assert.Contains(t, err.Error(), "retry interrupted during backoff")
 	// Should fail after the first attempt + backoff attempt starts
-	assert.Less(t, duration, time.Duration(backoffFunc(0))*time.Millisecond+15*time.Millisecond) // Should cancel during first backoff
+	assert.Less(
+		t,
+		duration,
+		time.Duration(backoffFunc(0))*time.Millisecond+15*time.Millisecond,
+	) // Should cancel during first backoff
 }
 
 // TestRetryContextCancellationBeforeFirstAttempt verifies that the retry stage respects context
@@ -860,7 +903,12 @@ func TestTimeoutExpired(t *testing.T) {
 	assert.Contains(t, err.Error(), fmt.Sprintf("stage timed out after %v", timeoutDuration))
 	// Check that the error occurred roughly around the timeout duration
 	assert.GreaterOrEqual(t, duration, timeoutDuration, "Duration should be at least the timeout")
-	assert.Less(t, duration, timeoutDuration+stageDelay, "Duration should be less than stage delay") // Ensure it didn't wait for the stage
+	assert.Less(
+		t,
+		duration,
+		timeoutDuration+stageDelay,
+		"Duration should be less than stage delay",
+	) // Ensure it didn't wait for the stage
 }
 
 // TestTimeoutStageError verifies that the timeout stage propagates errors returned
@@ -1241,7 +1289,12 @@ func TestDeadLetterQueueCustomLogger(t *testing.T) {
 	require.True(t, loggerCalled.Load(), "Custom logger should have been called")
 	require.Error(t, loggedErr, "Logged error should not be nil")
 	require.ErrorIs(t, loggedErr, dlqHandlerErr, "Logged error should wrap the DLQ handler error")
-	require.ErrorContains(t, loggedErr, processingErr.Error(), "Logged error should contain original processing error context")
+	require.ErrorContains(
+		t,
+		loggedErr,
+		processingErr.Error(),
+		"Logged error should contain original processing error context",
+	)
 }
 
 // TestDeadLetterQueuePanicNilHandler tests panic if handler is not provided.

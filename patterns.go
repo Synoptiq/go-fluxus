@@ -607,7 +607,11 @@ func (mr *MapReduce[I, K, V, R]) mapPhase(ctx context.Context, inputs []I) (<-ch
 
 // shufflePhase collects intermediate results from the map phase and groups them by key.
 // It also checks for errors from the map phase or context cancellation.
-func (mr *MapReduce[I, K, V, R]) shufflePhase(ctx context.Context, intermediateChan <-chan KeyValue[K, V], mapErrChan <-chan error) (map[K][]V, error) {
+func (mr *MapReduce[I, K, V, R]) shufflePhase(
+	ctx context.Context,
+	intermediateChan <-chan KeyValue[K, V],
+	mapErrChan <-chan error,
+) (map[K][]V, error) {
 	grouped := make(map[K][]V)
 	for {
 		select {

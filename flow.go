@@ -298,7 +298,11 @@ func (r *Router[I, O]) Process(ctx context.Context, input I) ([]O, error) {
 		index := selectedIndices[0]
 		// Validate the single index
 		if index < 0 || index >= len(r.routes) {
-			invalidIndexErr := fmt.Errorf("router selectorFunc returned invalid index %d (max %d)", index, len(r.routes)-1)
+			invalidIndexErr := fmt.Errorf(
+				"router selectorFunc returned invalid index %d (max %d)",
+				index,
+				len(r.routes)-1,
+			)
 			return nil, r.errHandler(invalidIndexErr)
 		}
 		// Get the single target stage
@@ -322,7 +326,11 @@ func (r *Router[I, O]) Process(ctx context.Context, input I) ([]O, error) {
 	targetStages := make([]Stage[I, O], numSelected)
 	for i, index := range selectedIndices {
 		if index < 0 || index >= len(r.routes) {
-			invalidIndexErr := fmt.Errorf("router selectorFunc returned invalid index %d (max %d)", index, len(r.routes)-1)
+			invalidIndexErr := fmt.Errorf(
+				"router selectorFunc returned invalid index %d (max %d)",
+				index,
+				len(r.routes)-1,
+			)
 			return nil, r.errHandler(invalidIndexErr) // Use error handler for invalid selector output
 		}
 		targetStages[i] = r.routes[index].Stage

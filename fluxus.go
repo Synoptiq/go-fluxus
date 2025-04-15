@@ -343,7 +343,11 @@ func NewStreamAdapter[I, O any](stage Stage[I, O], options ...StreamAdapterOptio
 
 	// --- Metrics: Report Concurrency ---
 	// Report concurrency after all options are applied
-	sa.metricsCollector.StageWorkerConcurrency(context.Background(), sa.adapterName, sa.concurrency) // Use background context as this isn't per-item
+	sa.metricsCollector.StageWorkerConcurrency(
+		context.Background(),
+		sa.adapterName,
+		sa.concurrency,
+	) // Use background context as this isn't per-item
 
 	return sa
 }
@@ -377,7 +381,9 @@ func (a *StreamAdapter[I, O]) processSequential(ctx context.Context, in <-chan I
 			}
 
 			// --- Start Tracing Span ---
-			itemCtx, itemSpan := a.tracer.Start(ctx, fmt.Sprintf("%s.process", a.adapterName), // Span name: adapterName.process
+			itemCtx, itemSpan := a.tracer.Start(
+				ctx,
+				fmt.Sprintf("%s.process", a.adapterName), // Span name: adapterName.process
 				trace.WithAttributes(
 					attribute.String("fluxus.adapter.name", a.adapterName),
 					attribute.Int("fluxus.adapter.concurrency", 1), // Explicitly 1 for sequential
@@ -482,7 +488,9 @@ func (a *StreamAdapter[I, O]) runWorker(gctx context.Context, jobs <-chan I, out
 	for item := range jobs { // Loop until 'jobs' channel is closed and empty
 		// --- Start Tracing Span ---
 		// Use gctx as parent, but create a new context for the item processing span
-		itemCtx, itemSpan := a.tracer.Start(gctx, fmt.Sprintf("%s.process", a.adapterName), // Span name: adapterName.process
+		itemCtx, itemSpan := a.tracer.Start(
+			gctx,
+			fmt.Sprintf("%s.process", a.adapterName), // Span name: adapterName.process
 			trace.WithAttributes(
 				attribute.String("fluxus.adapter.name", a.adapterName),
 				attribute.Int("fluxus.adapter.concurrency", a.concurrency),

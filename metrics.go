@@ -46,7 +46,11 @@ type MetricsCollector interface {
 	// StageWorkerConcurrency reports the configured concurrency for a stage within the stream.
 	StageWorkerConcurrency(ctx context.Context, stageName string, concurrencyLevel int) // Added (Renamed from Adapter*)
 	// StageWorkerItemProcessed reports successful processing of an item by a stream worker.
-	StageWorkerItemProcessed(ctx context.Context, stageName string, duration time.Duration) // Added (Renamed from Adapter*)
+	StageWorkerItemProcessed(
+		ctx context.Context,
+		stageName string,
+		duration time.Duration,
+	) // Added (Renamed from Adapter*)
 	// StageWorkerItemSkipped reports an item skipped due to an error with SkipOnError strategy.
 	StageWorkerItemSkipped(ctx context.Context, stageName string, err error) // Added (Renamed from Adapter*)
 	// StageWorkerErrorSent reports an error sent to an error channel via SendToErrorChannel strategy.

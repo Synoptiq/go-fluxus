@@ -379,7 +379,11 @@ func Finalize[LastOutput any](builder *StreamPipelineBuilder[LastOutput]) (*Stre
 
 	if lastStageActualOutputType != expectedLastOutputType {
 		// This indicates a potential misuse of the builder or an internal error.
-		return nil, fmt.Errorf("fluxus.Finalize: internal inconsistency - builder's final type %s does not match last stage's output type %s", expectedLastOutputType.Name(), lastStageActualOutputType.Name())
+		return nil, fmt.Errorf(
+			"fluxus.Finalize: internal inconsistency - builder's final type %s does not match last stage's output type %s",
+			expectedLastOutputType.Name(),
+			lastStageActualOutputType.Name(),
+		)
 	}
 
 	return &StreamPipeline{
@@ -504,7 +508,9 @@ func Run[I, O any](
 				)
 				defer func() { // This defer only runs if stageSpan is not nil
 					stageDuration := time.Since(stageStartTime)
-					stageSpan.SetAttributes(attribute.Int64("fluxus.pipeline.stage.duration_ms", stageDuration.Milliseconds()))
+					stageSpan.SetAttributes(
+						attribute.Int64("fluxus.pipeline.stage.duration_ms", stageDuration.Milliseconds()),
+					)
 					stageSpan.End()
 				}()
 				// --- Stage Span End ---

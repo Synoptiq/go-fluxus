@@ -15,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/synoptiq/go-fluxus"
 )
 
@@ -625,9 +626,16 @@ func TestStreamAdapterBufferSizeConcurrent(t *testing.T) {
 	// Let's set a generous upper bound for sending time (e.g., half of minProcessingTime).
 	maxExpectedSendDuration := minProcessingTime / 2
 
-	assert.Lessf(t, sendDuration, maxExpectedSendDuration,
+	assert.Lessf(
+		t,
+		sendDuration,
+		maxExpectedSendDuration,
 		"Sending %d items took %v, which is not significantly less than the minimum concurrent processing time %v (batches=%v). Buffer might not be effective.",
-		itemsToSend, sendDuration, minProcessingTime, batches)
+		itemsToSend,
+		sendDuration,
+		minProcessingTime,
+		batches,
+	)
 
 	// --- Cleanup ---
 	// Cancel the adapter's context
