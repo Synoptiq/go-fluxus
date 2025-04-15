@@ -1136,23 +1136,29 @@ func TestStreamPipelineRobustness(t *testing.T) {
 			// Collect results
 			var results []int
 			var errResults []fluxus.ProcessingError[int]
+			var resultsMu sync.Mutex
 			var resultsWg sync.WaitGroup
 			resultsWg.Add(1)
 			go func() {
 				defer resultsWg.Done()
 				for result := range sink {
+					resultsMu.Lock() // Lock before accessing results
 					results = append(results, result)
+					resultsMu.Unlock() // Unlock after accessing results
 				}
 			}()
 
 			// Collect errors if using error channel
+			var errMu sync.Mutex
 			if tc.strategy == fluxus.SendToErrorChannel {
 				var errWg sync.WaitGroup
 				errWg.Add(1)
 				go func() {
 					defer errWg.Done()
 					for err := range errChan {
+						errMu.Lock() // <<< Lock before accessing errResults
 						errResults = append(errResults, err)
+						errMu.Unlock() // <<< Unlock after accessing errResults
 					}
 				}()
 				// Ensure we close the error channel
@@ -1183,17 +1189,23 @@ func TestStreamPipelineRobustness(t *testing.T) {
 			if tc.completesPipeline {
 				// For strategies that should complete, we expect all non-error items
 				if tc.strategy == fluxus.SendToErrorChannel {
+					errMu.Lock() // <<< Lock before reading errResults
 					assert.Len(t, errResults, itemCount/3, "Expected errors for multiples of 3")
+					errMu.Unlock() // <<< Unlock after reading errResults
 				}
+				resultsMu.Lock()
 				assert.Len(t, results, itemCount-itemCount/3,
 					"Expected all non-error items to be processed")
 				assert.NotContains(t, results, 30, "Multiple of 3 should not be in results")
+				resultsMu.Unlock()
 			} else {
 				// For StopOnError, we expect it to fail quickly
 				require.Error(t, runErr)
 				assert.Contains(t, runErr.Error(), "flaky error")
+				resultsMu.Lock()
 				assert.Less(t, len(results), itemCount-itemCount/3,
 					"Expected pipeline to stop early on error")
+				resultsMu.Unlock()
 			}
 		})
 	}
