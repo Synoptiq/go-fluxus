@@ -99,6 +99,7 @@ Demonstrates building a stream processing pipeline for real-time data:
 - Shows concurrent processing of stream elements
 - Implements filtering, enrichment, and transformation of events
 - Uses channels for asynchronous processing
+- Utilizes the generic `StreamPipeline[I, O]` for type-safe construction and execution with typed channels.
 
 ## Timeout Handling (timeout.go)
 
