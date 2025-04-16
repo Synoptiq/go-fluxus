@@ -178,6 +178,13 @@ func Chain[A, B, C any](first Stage[A, B], second Stage[B, C]) Stage[A, C] {
 
 // ChainMany combines multiple stages into a single stage.
 // The output type of each stage must match the input type of the next stage.
+//
+// IMPORTANT: Due to limitations in Go's generics for variadic functions with
+// changing types, this function uses interface{} and runtime type assertions
+// internally. This means type mismatches between stages might only be caught
+// at runtime when the chained stage is processed, unlike the compile-time
+// safety provided by direct, nested calls to the Chain function.
+// Use with caution or prefer direct Chain calls for maximum type safety.
 func ChainMany[I, O any](stages ...interface{}) Stage[I, O] {
 	if len(stages) == 0 {
 		return StageFunc[I, O](func(_ context.Context, _ I) (O, error) {
@@ -695,8 +702,12 @@ func (a *StreamAdapter[I, O]) handleItemError(ctx context.Context, item I, err e
 	case StopOnError:
 		// Log and return the error to stop the stage/pipeline
 		wrappedErr := fmt.Errorf("adapter '%s' failed with StopOnError strategy: %w", a.adapterName, err)
-		a.logf("ERROR: fluxus.StreamAdapter '%s' stopping due to error: %v", a.adapterName, err) // Log original error for clarity
-		return false, wrappedErr                                                                 // Signal to stop and return the error
+		a.logf(
+			"ERROR: fluxus.StreamAdapter '%s' stopping due to error: %v",
+			a.adapterName,
+			err,
+		) // Log original error for clarity
+		return false, wrappedErr // Signal to stop and return the error
 	case SendToErrorChannel:
 		// Send the item and error to the configured error channel
 		processingErr := ProcessingError[I]{Item: item, Error: err}
