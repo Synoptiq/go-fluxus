@@ -93,7 +93,8 @@ b4 := fluxus.AddStage(b3, "stage-3", stage3)
 // b5 := fluxus.AddStreamStage(b4, "stream-stage", customStreamStage)
 
 // Finalize the pipeline
-pipeline, err := fluxus.Finalize(b4)
+// Specify the pipeline's overall Input and final Output types
+pipeline, err := fluxus.Finalize[InputType, OutputType](b4)
 if err != nil {
     log.Fatalf("Failed to build pipeline: %v", err)
 }
@@ -152,7 +153,7 @@ The pipeline will call these methods when you call `pipeline.Start` and `pipelin
 
 To run a stream pipeline, you need to provide source and sink channels:
 
-Note: While `pipeline.Start()` and `fluxus.Run()` accept source and sink as `interface{}`, they perform internal checks to ensure the channel element types match the pipeline's expected input and output types.
+Note: `pipeline.Start()` and `pipeline.Run()` now accept typed channels (`<-chan I`, `chan<- O`), providing compile-time safety for the pipeline's input and output. Ensure the pipeline variable and channels match the types specified during `Finalize[I, O]`.
 
 ```go
 // Create channels
@@ -219,7 +220,10 @@ wg.Add(1)
 go func() {
     defer wg.Done()
     // Run blocks until the pipeline finishes or the context is cancelled
-    runErr = fluxus.Run(ctx, pipeline, source, sink)
+    // pipeline must be *fluxus.StreamPipeline[int, OutputType]
+    // source must be chan int (or <-chan int)
+    // sink must be chan OutputType (or chan<- OutputType)
+    runErr = pipeline.Run(ctx, source, sink)
     if runErr != nil && !errors.Is(runErr, context.Canceled) {
         log.Printf("Pipeline Run error: %v", runErr)
     }
@@ -296,7 +300,7 @@ All stream stages respect context cancellation for proper cleanup:
 ctx, cancel := context.WithCancel(context.Background())
 
 // Start the pipeline
-go fluxus.Run(ctx, pipeline, source, sink)
+go pipeline.Run(ctx, source, sink)
 
 // Cancel the pipeline gracefully (e.g., after timeout)
 time.AfterFunc(30*time.Second, func() {
@@ -428,7 +432,7 @@ func main() {
     b2 := fluxus.AddStage(builder, tokenizeStage)
     b3 := fluxus.AddStage(b2, countStage)
     
-    pipeline, err := fluxus.Finalize(b3)
+    pipeline, err := fluxus.Finalize[string, int](b3)
     if err != nil {
         log.Fatalf("Failed to build pipeline: %v", err)
     }
@@ -446,7 +450,9 @@ func main() {
     wg.Add(1)
     go func() {
         defer wg.Done()
-        if err := fluxus.Run(ctx, pipeline, source, sink); err != nil {
+        // pipeline is *fluxus.StreamPipeline[string, int]
+        // source is chan string, sink is chan int
+        if err := pipeline.Run(ctx, source, sink); err != nil {
             log.Printf("Pipeline error: %v", err)
         }
     }()
