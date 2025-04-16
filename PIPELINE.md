@@ -104,6 +104,8 @@ pipeline := fluxus.ChainMany[string, string](stage1, stage2, stage3)
 
 A `Pipeline` wraps a stage (which can be a chained stage) and provides additional functionality like error handling and lifecycle management.
 
+Note: This basic `Pipeline[I, O]` processes items individually via its `Process` method. For continuous stream processing using channels, see the generic `StreamPipeline[I, O]` documented in STREAMPIPELINE.md.
+
 ```go
 // Create a pipeline with a chained stage
 pipeline := fluxus.NewPipeline(chainedStage)
