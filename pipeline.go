@@ -360,24 +360,25 @@ func AddStage[CurrentOutput, NextOutput any](
 	// and pipeline config, handling type assertions internally.
 	runner := func(ctx context.Context, inChan, outChan interface{}) error {
 		// Assert channels to their concrete types.
-		var typedInChan <-chan CurrentOutput
-		if ch, okInChan := inChan.(<-chan CurrentOutput); okInChan { // Check if it's exactly the source type
-			typedInChan = ch
-		} else if ch, okInChanBi := inChan.(chan CurrentOutput); okInChanBi { // Check if it's an intermediate bidirectional chan
-			typedInChan = ch // Assignable to <-chan CurrentOutput
-		} else {
-			// This should ideally never happen if Run is correct
-			return fmt.Errorf("internal error: stage '%s' received incompatible input channel type %T, expected <-chan %s or chan %s", name, inChan, inType.Name(), inType.Name())
+		typedInChan, okIn := castChannelToReadable[CurrentOutput](inChan)
+		if !okIn {
+			return fmt.Errorf(
+				"internal error: stage '%s' received incompatible input channel type %T, expected readable %s",
+				name,
+				inChan,
+				inType.Name(),
+			)
 		}
 
-		var typedOutChan chan<- NextOutput
-		if ch, okOutChan := outChan.(chan<- NextOutput); okOutChan { // Check if it's exactly the sink type
-			typedOutChan = ch
-		} else if ch, okOutChanBi := outChan.(chan NextOutput); okOutChanBi { // Check if it's an intermediate bidirectional chan
-			typedOutChan = ch // Assignable to chan<- NextOutput
-		} else {
-			// This should ideally never happen if Run is correct
-			return fmt.Errorf("internal error: stage '%s' received incompatible output channel type %T, expected chan<- %s or chan %s", name, outChan, outType.Name(), outType.Name())
+		// Use helper for output channel assertion
+		typedOutChan, okOut := castChannelToWritable[NextOutput](outChan)
+		if !okOut {
+			return fmt.Errorf(
+				"internal error: stage '%s' received incompatible output channel type %T, expected writable %s",
+				name,
+				outChan,
+				outType.Name(),
+			)
 		}
 
 		// Prepare the list of options to pass to NewStreamAdapter.
@@ -486,24 +487,25 @@ func AddStreamStage[CurrentOutput, NextOutput any](
 	// Create the runner function closure.
 	runner := func(ctx context.Context, inChan, outChan interface{}) error {
 		// Assert channels to their concrete types.
-		var typedInChan <-chan CurrentOutput
-		if ch, okInChan := inChan.(<-chan CurrentOutput); okInChan { // Check if it's exactly the source type
-			typedInChan = ch
-		} else if ch, okInChanBi := inChan.(chan CurrentOutput); okInChanBi { // Check if it's an intermediate bidirectional chan
-			typedInChan = ch // Assignable to <-chan CurrentOutput
-		} else {
-			// This should ideally never happen if Run is correct
-			return fmt.Errorf("internal error: stage '%s' received incompatible input channel type %T, expected <-chan %s or chan %s", name, inChan, inType.Name(), inType.Name())
+		typedInChan, okIn := castChannelToReadable[CurrentOutput](inChan)
+		if !okIn {
+			return fmt.Errorf(
+				"internal error: stage '%s' received incompatible input channel type %T, expected readable %s",
+				name,
+				inChan,
+				inType.Name(),
+			)
 		}
 
-		var typedOutChan chan<- NextOutput
-		if ch, okOutChan := outChan.(chan<- NextOutput); okOutChan { // Check if it's exactly the sink type
-			typedOutChan = ch
-		} else if ch, okOutChanBi := outChan.(chan NextOutput); okOutChanBi { // Check if it's an intermediate bidirectional chan
-			typedOutChan = ch // Assignable to chan<- NextOutput
-		} else {
-			// This should ideally never happen if Run is correct
-			return fmt.Errorf("internal error: stage '%s' received incompatible output channel type %T, expected chan<- %s or chan %s", name, outChan, outType.Name(), outType.Name())
+		// Use helper for output channel assertion
+		typedOutChan, okOut := castChannelToWritable[NextOutput](outChan)
+		if !okOut {
+			return fmt.Errorf(
+				"internal error: stage '%s' received incompatible output channel type %T, expected writable %s",
+				name,
+				outChan,
+				outType.Name(),
+			)
 		}
 
 		// --- Metrics Note ---
@@ -560,12 +562,12 @@ func AddStreamStage[CurrentOutput, NextOutput any](
 //   - Emitting pipeline-level metrics and traces.
 //
 // Use the Start, Wait, and Stop methods (or the convenience Run function) to control execution.
-type StreamPipeline struct {
+type StreamPipeline[I, O any] struct {
 	stages []runnableStage
 	cfg    *streamPipelineConfig
 	// Store the overall input and output types for final validation in Run
-	firstInputType reflect.Type
-	lastOutputType reflect.Type
+	// firstInputType reflect.Type
+	// lastOutputType reflect.Type
 
 	// --- New Lifecycle Fields ---
 	startMu  sync.Mutex         // Protects access to started flag and during start/stop transitions
@@ -589,76 +591,39 @@ type StreamPipeline struct {
 // Finalize constructs the runnable StreamPipeline from the builder.
 // It performs final validation checks. The `LastOutput` type parameter
 // must match the output type of the very last stage added.
-func Finalize[LastOutput any](builder *StreamPipelineBuilder[LastOutput]) (*StreamPipeline, error) {
+func Finalize[I, O any](builder *StreamPipelineBuilder[O]) (*StreamPipeline[I, O], error) {
 	if len(builder.stages) == 0 {
 		return nil, errors.New("fluxus.Finalize: cannot build an empty pipeline")
 	}
 
-	// Final check: Ensure the builder's final output type matches the last stage's output type.
-	// This is mostly a sanity check, as the generic Add methods should guarantee this.
-	lastStageActualOutputType := builder.stages[len(builder.stages)-1].outType
-	expectedLastOutputType := reflect.TypeOf((*LastOutput)(nil)).Elem()
-
-	if lastStageActualOutputType != expectedLastOutputType {
-		// This indicates a potential misuse of the builder or an internal error.
-		return nil, fmt.Errorf(
-			"fluxus.Finalize: internal inconsistency - builder's final type %s does not match last stage's output type %s",
-			expectedLastOutputType.Name(),
-			lastStageActualOutputType.Name(),
+	// --- Optional Sanity Check (Recommended) ---
+	// Verify the builder's actual first stage input matches the expected 'I' type.
+	// Generics should enforce this, but an explicit check catches potential misuse.
+	firstStageActualInputType := builder.stages[0].inType
+	expectedFirstInputType := reflect.TypeOf((*I)(nil)).Elem()
+	if firstStageActualInputType != expectedFirstInputType {
+		// This indicates a mismatch, likely a programming error in how Finalize was called
+		// relative to how the builder was created (e.g., NewStreamPipeline[string] but Finalize[int, ...])
+		return nil, NewPipelineConfigurationError(
+			fmt.Sprintf(
+				"fluxus.Finalize: builder's first stage input type (%s) does not match expected pipeline input type (%s)",
+				firstStageActualInputType.Name(),
+				expectedFirstInputType.Name(),
+			),
 		)
 	}
+	// --- End Optional Sanity Check ---
 
-	return &StreamPipeline{
-		stages:         builder.stages,
-		cfg:            builder.cfg,
-		firstInputType: builder.stages[0].inType,                    // Input type of the first stage
-		lastOutputType: lastStageActualOutputType,                   // Output type of the last stage
-		starters:       append([]Starter(nil), builder.starters...), // Copy slices
-		stoppers:       append([]Stopper(nil), builder.stoppers...), // Copy slices
-		stopCh:         make(chan struct{}),                         // Initialize stopCh here or in Start
+	return &StreamPipeline[I, O]{
+		stages:   builder.stages,
+		cfg:      builder.cfg,
+		starters: append([]Starter(nil), builder.starters...), // Copy slices
+		stoppers: append([]Stopper(nil), builder.stoppers...), // Copy slices
+		stopCh:   make(chan struct{}),                         // Initialize stopCh here or in Start
 	}, nil
 }
 
 // --- Pipeline Execution ---
-
-// validateStartChannels checks if the user-provided source and sink channels in Start/Run
-// have element types that match the expected input type of the first stage and the
-// output type of the last stage, respectively. It also ensures they are readable/writable.
-// Returns a PipelineConfigurationError if validation fails.
-func (p *StreamPipeline) validateStartChannels(source, sink interface{}) error {
-	// Validate source channel type
-	sourceVal := reflect.ValueOf(source)
-	if sourceVal.Kind() != reflect.Chan || sourceVal.Type().ChanDir()&reflect.RecvDir == 0 {
-		return NewPipelineConfigurationError(fmt.Sprintf("source must be a readable channel, got %T", source))
-	}
-	sourceType := sourceVal.Type().Elem() // Use Elem() for channel element type
-	if sourceType != p.firstInputType {
-		return NewPipelineConfigurationError(
-			fmt.Sprintf(
-				"incompatible source channel type. Expected %s, got %s",
-				p.firstInputType.Name(),
-				sourceType.Name(),
-			),
-		)
-	}
-
-	// Validate sink channel type
-	sinkVal := reflect.ValueOf(sink)
-	if sinkVal.Kind() != reflect.Chan || sinkVal.Type().ChanDir()&reflect.SendDir == 0 {
-		return NewPipelineConfigurationError(fmt.Sprintf("sink must be a writable channel, got %T", sink))
-	}
-	sinkType := sinkVal.Type().Elem() // Use Elem() for channel element type
-	if sinkType != p.lastOutputType {
-		return NewPipelineConfigurationError(
-			fmt.Sprintf(
-				"incompatible sink channel type. Expected %s, got %s",
-				p.lastOutputType.Name(),
-				sinkType.Name(),
-			),
-		)
-	}
-	return nil
-}
 
 // initializeObservability sets up the pipeline-level trace span and records the start time
 // for metrics. It should be called at the beginning of Start/Run.
@@ -666,7 +631,7 @@ func (p *StreamPipeline) validateStartChannels(source, sink interface{}) error {
 // the start time, and a boolean indicating if a real metrics collector is configured.
 //
 //nolint:nonamedreturns // Clear enough for internal helper
-func (p *StreamPipeline) initializeObservability(ctx context.Context) (
+func (p *StreamPipeline[I, O]) initializeObservability(ctx context.Context) (
 	pipelineCtx context.Context,
 	pipelineSpan trace.Span,
 	startTime time.Time,
@@ -716,7 +681,7 @@ func (p *StreamPipeline) initializeObservability(ctx context.Context) (
 // required for managing the pipeline's execution lifecycle. It derives the internal
 // context (runCtx) from the potentially trace-enhanced pipeline context.
 // Returns the errgroup's context (gctx) which should be passed to stage goroutines.
-func (p *StreamPipeline) initializeRunState(pipelineCtx context.Context) context.Context {
+func (p *StreamPipeline[I, O]) initializeRunState(pipelineCtx context.Context) context.Context {
 	p.stopCh = make(chan struct{})
 	// Create the cancellable context for the errgroup, derived from the (potentially traced) pipelineCtx
 	p.runCtx, p.cancelFn = context.WithCancel(pipelineCtx)
@@ -730,7 +695,7 @@ func (p *StreamPipeline) initializeRunState(pipelineCtx context.Context) context
 // pipeline cancellation. If any Starter fails, it attempts to gracefully stop any
 // previously started Starters (using the original context for timeout) and returns an error,
 // after finalizing observability fields to indicate the failed start.
-func (p *StreamPipeline) startStarterStages(
+func (p *StreamPipeline[I, O]) startStarterStages(
 	ctx context.Context,
 	gctx context.Context,
 	pipelineSpan trace.Span,
@@ -779,7 +744,7 @@ func (p *StreamPipeline) startStarterStages(
 // Each goroutine executes the stage's `run` function, passing it the appropriate
 // input and output channels and the errgroup's context (gctx).
 // It also wraps each stage's execution in a trace span if tracing is enabled.
-func (p *StreamPipeline) launchStageGoroutines(gctx context.Context, source, sink interface{}) {
+func (p *StreamPipeline[I, O]) launchStageGoroutines(gctx context.Context, source, sink interface{}) {
 	p.cfg.logger.Printf("DEBUG: Launching stage goroutines for pipeline '%s'...", p.cfg.pipelineName)
 	var currentInChan = source
 	tracer := p.cfg.tracer // Get tracer from config
@@ -869,7 +834,7 @@ func (p *StreamPipeline) launchStageGoroutines(gctx context.Context, source, sin
 //
 // Returns ErrPipelineAlreadyStarted, ErrEmptyPipeline, PipelineConfigurationError,
 // or an error from a Starter stage's Start method. Returns nil on success.
-func (p *StreamPipeline) Start(ctx context.Context, source interface{}, sink interface{}) error {
+func (p *StreamPipeline[I, O]) Start(ctx context.Context, source <-chan I, sink chan<- O) error {
 	p.startMu.Lock()
 	defer p.startMu.Unlock()
 
@@ -881,27 +846,22 @@ func (p *StreamPipeline) Start(ctx context.Context, source interface{}, sink int
 		return ErrEmptyPipeline
 	}
 
-	// 2. Type Validation
-	if err := p.validateStartChannels(source, sink); err != nil {
-		return err
-	}
-
-	// 3. Observability Setup
+	// 2. Observability Setup
 	pipelineCtx, pipelineSpan, startTime, isRealCollector := p.initializeObservability(ctx)
 
-	// 4. Initialize Lifecycle State
+	// 3. Initialize Lifecycle State
 	gctx := p.initializeRunState(pipelineCtx) // Get the group's context
 
-	// 5. Start Starter Stages (handles its own cleanup on failure)
+	// 4. Start Starter Stages (handles its own cleanup on failure)
 	if err := p.startStarterStages(ctx, gctx, pipelineSpan, isRealCollector, startTime); err != nil {
 		// Error already wrapped, observability handled within the helper on failure
 		return err
 	}
 
-	// 6. Launch Stage Goroutines
+	// 5. Launch Stage Goroutines
 	p.launchStageGoroutines(gctx, source, sink)
 
-	// 7. Finalization
+	// 6. Finalization
 	p.started.Store(true)
 	p.cfg.logger.Printf("INFO: Pipeline '%s' started successfully.", p.cfg.pipelineName)
 
@@ -927,7 +887,7 @@ func (p *StreamPipeline) Start(ctx context.Context, source interface{}, sink int
 // Returns ErrPipelineNotStarted if called before Start() or after Stop()/Wait() has completed.
 //
 //nolint:nonamedreturns // runErr is idiomatic here
-func (p *StreamPipeline) Wait() (runErr error) {
+func (p *StreamPipeline[I, O]) Wait() (runErr error) {
 	p.startMu.Lock()
 	if !p.started.Load() {
 		p.startMu.Unlock()
@@ -1018,7 +978,7 @@ func (p *StreamPipeline) Wait() (runErr error) {
 // Note: Errors returned by the running stages themselves are returned by Wait(), not Stop().
 //
 //nolint:nonamedreturns // stopErr is idiomatic here
-func (p *StreamPipeline) Stop(ctx context.Context) (stopErr error) {
+func (p *StreamPipeline[I, O]) Stop(ctx context.Context) (stopErr error) {
 	p.startMu.Lock()
 	if !p.started.Load() {
 		p.startMu.Unlock()
@@ -1133,7 +1093,7 @@ func (p *StreamPipeline) Stop(ctx context.Context) (stopErr error) {
 // Helper function to call Stop on Stopper stages in reverse order.
 // It collects errors into a MultiError if multiple stoppers fail.
 // Uses the provided context for cancellation/timeout of the stop calls.
-func (p *StreamPipeline) stopStoppers(ctx context.Context, lastIndex int) error {
+func (p *StreamPipeline[I, O]) stopStoppers(ctx context.Context, lastIndex int) error {
 	var multiErr *MultiError // Assuming you have or will create a MultiError type
 	for i := lastIndex; i >= 0; i-- {
 		stopper := p.stoppers[i]
@@ -1158,45 +1118,60 @@ func (p *StreamPipeline) stopStoppers(ctx context.Context, lastIndex int) error 
 
 // Run provides a convenient way to execute a finalized StreamPipeline synchronously.
 // It orchestrates the Start, Wait, and Stop lifecycle methods.
-//
-// It performs these actions:
-//  1. Calls pipeline.Start(ctx, source, sink).
-//  2. If Start succeeds, it calls pipeline.Wait() to block until completion or error.
-//  3. Regardless of Wait's outcome, it calls pipeline.Stop() with a background context
-//     and a fixed timeout (e.g., 15s) to ensure cleanup is attempted.
-//
-// The `source` and `sink` channels must match the pipeline's expected input/output types.
-// The provided `ctx` governs the *runtime* of the pipeline; if it's cancelled, Wait()
-// will likely return a cancellation error. The Stop call uses its own timeout.
-//
-// Returns the error from Start() if initialization fails.
-// Returns the error from Wait() if the pipeline execution fails or is cancelled.
-// Errors during the final Stop() call are logged but not returned by Run.
-// Returns nil if the pipeline starts, runs, and stops successfully.
-func Run(ctx context.Context, pipeline *StreamPipeline, source interface{}, sink interface{}) error {
+// ... (existing documentation) ...
+// CHANGE signature: add receiver (pipeline *StreamPipeline[I, O]) and typed channels
+func (p *StreamPipeline[I, O]) Run(ctx context.Context, source <-chan I, sink chan<- O) error {
 	// Start the pipeline (non-blocking)
-	err := pipeline.Start(ctx, source, sink) // Pass interface{} directly
+	// CHANGE: Call the method pipeline.Start
+	err := p.Start(ctx, source, sink)
 	if err != nil {
-		// If start fails, attempt a cleanup Stop just in case some resources were partially acquired.
+		// If start fails, attempt a cleanup Stop just in case.
 		// Use a background context for this cleanup stop.
-		_ = pipeline.Stop(context.Background())
+		_ = p.Stop(context.Background()) // Use the method receiver
 		return fmt.Errorf("failed to start pipeline: %w", err)
 	}
 
 	// Wait for the pipeline to complete or error out (blocking)
-	runErr := pipeline.Wait()
+	runErr := p.Wait() // Use the method receiver
 
-	// Always attempt to Stop the pipeline cleanly after Wait finishes,
-	// even if Wait returned an error. Stop handles idempotency.
-	// Use a separate context for Stop, perhaps with a short timeout,
-	// as the main ctx might already be done.
+	// Always attempt to Stop the pipeline cleanly after Wait finishes
 	stopCtx, cancelStop := context.WithTimeout(context.Background(), 15*time.Second) // Example timeout
 	defer cancelStop()
-	if stopErr := pipeline.Stop(stopCtx); stopErr != nil {
-		pipeline.cfg.logger.Printf("ERROR: Error during pipeline stop after run: %v", stopErr)
-		// We typically return the runErr, as that's the primary outcome.
-		// Stop errors are logged.
+	// CHANGE: Call the method pipeline.Stop
+	if stopErr := p.Stop(stopCtx); stopErr != nil {
+		p.cfg.logger.Printf("ERROR: Error during pipeline stop after run: %v", stopErr)
+		// Log stop errors but return the primary execution error (runErr)
 	}
 
 	return runErr // Return the error from the pipeline's execution (Wait)
+}
+
+// castChannelToReadable attempts to cast an interface{} to a readable channel of type T.
+// It handles both <-chan T and chan T.
+func castChannelToReadable[T any](ch interface{}) (<-chan T, bool) {
+	// Check for exact read-only type first
+	if typedChan, ok := ch.(<-chan T); ok {
+		return typedChan, true
+	}
+	// Check for bidirectional type (assignable to read-only)
+	if typedChan, ok := ch.(chan T); ok {
+		return typedChan, true // chan T can be used as <-chan T
+	}
+	// Type mismatch
+	return nil, false
+}
+
+// castChannelToWritable attempts to cast an interface{} to a writable channel of type T.
+// It handles both chan<- T and chan T.
+func castChannelToWritable[T any](ch interface{}) (chan<- T, bool) {
+	// Check for exact write-only type first
+	if typedChan, ok := ch.(chan<- T); ok {
+		return typedChan, true
+	}
+	// Check for bidirectional type (assignable to write-only)
+	if typedChan, ok := ch.(chan T); ok {
+		return typedChan, true // chan T can be used as chan<- T
+	}
+	// Type mismatch
+	return nil, false
 }
