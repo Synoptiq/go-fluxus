@@ -412,6 +412,7 @@ linters:
             errorlint,
             testifylint,
             rowserrcheck,
+            musttag,
           ]
       - source: "TODO"
         linters: [godot]

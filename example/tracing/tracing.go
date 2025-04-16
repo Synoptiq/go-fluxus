@@ -138,14 +138,14 @@ func buildTracedPipeline() *fluxus.Pipeline[Request, Response] {
 	// Wrap stages with tracing
 	tracedUserDataStage := fluxus.NewTracedStage(
 		userDataStage,
-		fluxus.WithTracerName[Request, map[string]interface{}]("fetch-user-data"),
+		fluxus.WithTracerStageName[Request, map[string]interface{}]("fetch-user-data"),
 		fluxus.WithTracerAttributes[Request, map[string]interface{}](attribute.String("service.type", "user")),
 	)
 	fmt.Println("   - Wrapped user data stage with tracing.")
 
 	tracedProductDataStage := fluxus.NewTracedStage(
 		productDataStage,
-		fluxus.WithTracerName[Request, map[string]interface{}]("fetch-product-data"),
+		fluxus.WithTracerStageName[Request, map[string]interface{}]("fetch-product-data"),
 		fluxus.WithTracerAttributes[Request, map[string]interface{}](attribute.String("service.type", "product")),
 	)
 	fmt.Println("   - Wrapped product data stage with tracing.")
@@ -160,8 +160,10 @@ func buildTracedPipeline() *fluxus.Pipeline[Request, Response] {
 	// Add tracing to the fan-out operation itself
 	tracedDataFanOut := fluxus.NewTracedFanOut(
 		dataFanOut,
-		"parallel-initial-fetch",
-		attribute.String("operation", "data-fetch"),
+		fluxus.WithTracerStageName[Request, []map[string]interface{}]("fan-out-initial-fetch"),
+		fluxus.WithTracerAttributes[Request, []map[string]interface{}](
+			attribute.String("operation", "data-fetch"),
+		),
 	)
 	fmt.Println("   - Created traced fan-out for initial data fetch.")
 
@@ -222,7 +224,7 @@ func buildTracedPipeline() *fluxus.Pipeline[Request, Response] {
 	// Wrap enrichment stage with tracing
 	tracedProcessDataStage := fluxus.NewTracedStage(
 		processDataStage,
-		fluxus.WithTracerName[[]map[string]interface{}, Response]("process-and-enrich-data"),
+		fluxus.WithTracerStageName[[]map[string]interface{}, Response]("process-and-enrich-data"),
 		fluxus.WithTracerAttributes[[]map[string]interface{}, Response](attribute.String("operation", "enrichment")),
 	)
 	fmt.Println("   - Wrapped enrichment stage with tracing.")
