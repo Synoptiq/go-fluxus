@@ -368,6 +368,10 @@ type JoinByKey[I any, K comparable] struct {
 // NewJoinByKey creates a new JoinByKey stage.
 // The keyFunc is used to extract a comparable key from each input item.
 func NewJoinByKey[I any, K comparable](keyFunc KeyFunc[I, K]) *JoinByKey[I, K] {
+	if keyFunc == nil {
+		panic("fluxus.NewJoinByKey: keyFunc cannot be nil")
+	}
+
 	return &JoinByKey[I, K]{
 		keyFunc:    keyFunc,
 		errHandler: func(err error) error { return err }, // Default error handler
@@ -387,15 +391,11 @@ func (j *JoinByKey[I, K]) WithErrorHandler(handler func(error) error) *JoinByKey
 // Process implements the Stage interface for JoinByKey.
 // It groups items from the input slice into a map based on the extracted key.
 func (j *JoinByKey[I, K]) Process(ctx context.Context, inputs []I) (map[K][]I, error) {
-	// Check context cancellation first
+	// Context cancellation check moved after keyFunc nil check,
+	// but with constructor panic, keyFunc won't be nil here.
+	// For robustness, keeping ctx.Err() check early is good.
 	if ctx.Err() != nil {
-		// Return nil map on context error
 		return nil, j.errHandler(ctx.Err())
-	}
-
-	if j.keyFunc == nil {
-		// Handle the case where the keyFunc was nil during construction
-		return nil, j.errHandler(errors.New("JoinByKey: keyFunc cannot be nil"))
 	}
 
 	// Initialize the result map
