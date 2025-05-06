@@ -63,10 +63,8 @@ func (m *Map[I, O]) handleMapItemError(
 	wrappedErr := NewMapItemError(index, err) // Use the specific error type
 
 	if m.collectErrors {
-		// Need to check if errs is nil here too
-		if errs != nil {
-			errs[index] = wrappedErr
-		}
+		// errs is guaranteed to be non-nil if m.collectErrors is true
+		errs[index] = wrappedErr
 		// Store zero value for output on error when collecting
 		var zero O
 		results[index] = zero
