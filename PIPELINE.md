@@ -45,25 +45,85 @@ func (d *DoubleStage) Process(_ context.Context, input int) (int, error) {
 stage := &DoubleStage{}
 ```
 
-### Starter and Stopper Stages
+### Extended Stage Lifecycle Interfaces
 
-Stages can optionally implement `Starter` and `Stopper` interfaces to manage resources:
+Stages can optionally implement various lifecycle interfaces to manage resources, initialize state, perform cleanup, reset, or report health. The `Pipeline` (and `StreamPipeline`) will automatically call these methods on any of its managed stages that implement them.
 
 ```go
-// Corrected example
 package fluxus
 import "context"
 
-type Starter interface {
-	Start(ctx context.Context) error
+// Initializer allows a stage to perform one-time setup or initialization tasks
+// when the pipeline starts.
+type Initializer interface {
+    Setup(ctx context.Context) error
 }
 
-type Stopper interface {
-	Stop(ctx context.Context) error
+// Closer allows a stage to release resources or perform final cleanup
+// when the pipeline stops.
+type Closer interface {
+    Close(ctx context.Context) error
+}
+
+// Resettable allows a stage's internal state to be reset to an initial condition.
+type Resettable interface {
+    Reset(ctx context.Context) error
+}
+
+// HealthCheckable allows a stage to report its current operational health.
+// Returning an error typically indicates an unhealthy status.
+type HealthCheckable interface {
+    HealthStatus(ctx context.Context) error
 }
 ```
 
-The pipeline will call these methods when you call `pipeline.Start` and `pipeline.Stop`.
+When you use a Pipeline:
+ - `pipeline.Start(ctx)` will call `Setup(ctx)` on all `Initializer` stages.
+ - `pipeline.Stop(ctx)` will call `Close(ctx)` on all `Closer` stages.
+  
+The `pipeline.Reset(ctx)` and `pipeline.HealthStatus(ctx)` methods also interact with these interfaces, as described below.
+
+### Pipeline Lifecycle and State Management
+
+The `Pipeline` provides methods to control its lifecycle and manage its state, including the state of its constituent stages.
+
+`Start`, `Stop`, `Reset`, and `HealthStatus`
+
+These methods manage the pipeline's operational state:
+
+```go
+// Example context
+ctx := context.Background()
+
+// Start the pipeline and any sub-stages implementing Initializer
+if err := pipeline.Start(ctx); err != nil {
+    log.Fatalf("Failed to start pipeline: %v", err)
+}
+
+// ... pipeline processing ...
+
+// Reset the pipeline and any sub-stages implementing Resettable
+if err := pipeline.Reset(ctx); err != nil {
+    log.Printf("Error resetting pipeline: %v", err)
+}
+
+// Check the health of the pipeline and any sub-stages implementing HealthCheckable
+// The exact return type for HealthStatus might be a custom struct or an error.
+// For example, if it returns an error, nil might mean healthy.
+if healthErr := pipeline.HealthStatus(ctx); healthErr != nil {
+    log.Printf("Pipeline health check failed: %v", healthErr)
+}
+
+// Stop the pipeline and any sub-stages implementing Closer
+if err := pipeline.Stop(ctx); err != nil {
+    log.Printf("Error stopping pipeline: %v", err)
+}
+```
+
+ - `Start(ctx)`: Initializes and starts the pipeline. It calls `Setup()` on `Initializer` stages. Process will return a `fluxus.ErrPipelineNotStarted` error if `Start` was not called.
+ - `Stop(ctx)`: Stops the pipeline. It calls `Close()` on `Closer` stages.
+ - `Reset(ctx)`: Resets the pipeline. This typically involves calling `Reset()` on all stages within the pipeline that implement the `Resettable` interface, allowing them to clear or re-initialize their internal state.
+ - `HealthStatus(ctx)`: Checks the health of the pipeline. This involves calling `HealthStatus()` on all stages that implement the `HealthCheckable` interface. The pipeline may aggregate these statuses to provide an overall health indication (e.g., returning an error if any stage is unhealthy).
 
 ### Chain
 
@@ -130,23 +190,20 @@ defer func() {
 result, err := pipeline.Process(ctx, "input")
 ```
 
-### `Start` and `Stop`
+### Windowing (Stream Pipelines)
 
-The `Start` and `Stop` methods manage the pipeline's lifecycle, particularly if the underlying stage has setup/teardown requirements.
+For stream processing, Fluxus provides built-in `StreamStage` implementations for windowing patterns. These stages group items from a stream into windows based on item count or time, which can then be processed as a batch. Common types include:
 
-```go
-// Start the pipeline and any sub-stages implementing Starter
-if err := pipeline.Start(ctx); err != nil {
-    log.Fatalf("Failed to start pipeline: %v", err)
-}
+-   **Tumbling Windows**: Fixed-size, non-overlapping windows.
+    -   `TumblingCountWindow[T,any]`: Groups by item count.
+    -   `TumblingTimeWindow[T,any]`: Groups by time duration.
+-   **Sliding Windows**: Fixed-size, potentially overlapping windows.
+    -   `SlidingCountWindow[T,any]`: Emits a window of the last `size` items every `slide` items.
+    -   `SlidingTimeWindow[T,any]`: Emits a window of items from the last `duration` every `slide` interval.
 
-// Stop the pipeline and any sub-stages implementing Stopper
-if err := pipeline.Stop(ctx); err != nil {
-    log.Printf("Error stopping pipeline: %v", err)
-}
-```
+These stages typically output `[]T` (a slice of the windowed items).
 
-`Process` will return a `fluxus.ErrPipelineNotStarted` error if Start was not called.
+Refer to the Stream Pipeline Documentation for detailed examples and usage of these windowing stages.
 
 ## Error Handling
 

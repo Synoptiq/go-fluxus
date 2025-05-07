@@ -100,54 +100,275 @@ if err != nil {
 }
 ```
 
-### Lifecycle Management
+### Windowing Operations
 
-Stream pipelines now have explicit `Start()`, `Wait()`, and `Stop()` methods to control their lifecycle:
+Stream pipelines can perform windowing operations, allowing you to process data in chunks or windows based on item count or time. This is useful for aggregations, sessionization, and time-series analysis. Fluxus provides built-in `StreamStage` implementations for common windowing strategies.
+
+Windowing stages typically take individual items of type `T` as input and emit slices of items (`[]T`) as output, representing the collected window.
+
+#### Tumbling Windows
+
+##### 1. Tumbling Count Window (`TumblingCountWindow`)
+
+Collects items into fixed-size, non-overlapping windows based on item count.
 
 ```go
-pipeline := /* ... build pipeline ... */
+import (
+    "context"
+    "fmt"
+    "github.com/synoptiq/go-fluxus"
+    "log"
+    "time"
+)
+
+// Example usage:
+// Create a tumbling window that groups every 3 integers.
+countWindow := fluxus.NewTumblingCountWindow[int](3)
+
+// Add to pipeline:
+builder := fluxus.NewStreamPipeline[int]()
+b2 := fluxus.AddStreamStage(builder, "tumbling_count_window", countWindow)
+// The output type of b2 will be []int
+pipeline, _ := fluxus.Finalize[int, []int](b2)
+
+// When run, if the source sends: 1, 2, 3, 4, 5
+// The sink will receive: [1, 2, 3], then [4, 5] (if source closes)
+```
+
+When the input channel closes, any remaining items in the internal buffer are emitted as a final, potentially smaller, window.
+
+##### 2. Tumbling Time Window (`TumblingTimeWindow`)
+
+Collects items into fixed-duration, non-overlapping windows based on time.
+
+```go
+import (
+    "context"
+    "fmt"
+    "github.com/synoptiq/go-fluxus"
+    "log"
+    "time"
+)
+
+// Example usage:
+// Create a tumbling window that groups items received within each 5-second interval.
+timeWindow := fluxus.NewTumblingTimeWindow[string](5 * time.Second)
+
+// Add to pipeline:
+builder := fluxus.NewStreamPipeline[string]()
+b2 := fluxus.AddStreamStage(builder, "tumbling_time_window", timeWindow)
+// The output type of b2 will be []string
+pipeline, _ := fluxus.Finalize[string, []string](b2)
+
+// When run, items arriving within a 5-second period will be grouped.
+// If items "a", "b" arrive, then 5 seconds pass, then "c" arrives:
+// The sink will receive: ["a", "b"], then (after another 5s or source close) ["c"]
+```
+
+The `TumblingTimeWindow` uses a timer. When the timer fires, all items collected since the last tick are emitted as a window. If the input channel closes, any buffered items are flushed as a final window.
+
+#### Sliding Windows
+
+##### 1. Sliding Count Window (`SlidingCountWindow`)
+
+Collects items into potentially overlapping windows based on item count. It emits a window containing the last `size` items every `slide` items received.
+
+```go
+import (
+    "context"
+    "fmt"
+    "github.com/synoptiq/go-fluxus"
+    "log"
+    "time"
+)
+
+// Example usage:
+// Create a sliding window of size 3 that slides every 1 item.
+// This means after 3 items are seen, a window of [item1, item2, item3] is emitted.
+// When item4 arrives, a window of [item2, item3, item4] is emitted.
+slidingCountWindow := fluxus.NewSlidingCountWindow[int](3, 1) // size=3, slide=1
+
+// Add to pipeline:
+builder := fluxus.NewStreamPipeline[int]()
+b2 := fluxus.AddStreamStage(builder, "sliding_count_window", slidingCountWindow)
+// The output type of b2 will be []int
+pipeline, _ := fluxus.Finalize[int, []int](b2)
+
+// If source sends: 1, 2, 3, 4, 5
+// Sink receives:
+// [1, 2, 3] (after 3rd item)
+// [2, 3, 4] (after 4th item)
+// [3, 4, 5] (after 5th item)
+```
+
+The `SlidingCountWindow` uses an internal circular buffer to efficiently manage the items for the sliding window. A window is emitted only once the buffer has collected at least `size` items.
+
+##### 2. Sliding Time Window (`SlidingTimeWindow`)
+
+Collects items into potentially overlapping windows based on time. It emits a window containing items that arrived within the last `duration` every `slide` interval.
+
+```go
+import (
+    "context"
+    "fmt"
+    "github.com/synoptiq/go-fluxus"
+    "log"
+    "time"
+)
+
+// Example usage:
+// Create a sliding time window of 10-second duration that slides every 2 seconds.
+// Every 2 seconds, a window containing all items that arrived in the preceding 10 seconds is emitted.
+slidingTimeWindow := fluxus.NewSlidingTimeWindow[string](10*time.Second, 2*time.Second)
+
+// Add to pipeline:
+builder := fluxus.NewStreamPipeline[string]()
+b2 := fluxus.AddStreamStage(builder, "sliding_time_window", slidingTimeWindow)
+// The output type of b2 will be []string
+pipeline, _ := fluxus.Finalize[string, []string](b2)
+```
+
+The `SlidingTimeWindow` uses a ticker to trigger window evaluations. Items are timestamped upon arrival. When a tick occurs, the stage gathers all items whose timestamps fall within the `[now - duration, now)` interval. Old items are pruned from the internal buffer.
+
+### Processing Windowed Data
+
+After a windowing stage, you'll typically have a `StreamStage` that processes the `[]T` (slice of items). This stage can perform aggregations, transformations, or any other batch-like operation on the window.
+
+```go
+// Example stage to process a window of integers (e.g., sum them)
+type SumWindowStage struct{}
+
+func (s *SumWindowStage) ProcessStream(ctx context.Context, in <-chan []int, out chan<- int) error {
+    defer close(out)
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case window, ok := <-in:
+            if !ok {
+                return nil // Input closed
+            }
+            sum := 0
+            for _, item := range window {
+                sum += item
+            }
+            // Send the sum
+            select {
+            case out <- sum:
+            case <-ctx.Done():
+                return ctx.Err()
+            }
+        }
+    }
+}
+
+// In pipeline construction:
+// builder := fluxus.NewStreamPipeline[int]()
+// b2 := fluxus.AddStreamStage(builder, "tumbling_count_window", fluxus.NewTumblingCountWindow[int](3))
+// b3 := fluxus.AddStreamStage(b2, "sum_window", &SumWindowStage{}) // Input: []int, Output: int
+// pipeline, _ := fluxus.Finalize[int, int](b3)
+```
+
+**Note**: When implementing windowing stages or stages that consume windowed data, always ensure that the output channel of your `StreamStage` is closed before its `ProcessStream` method returns. This is crucial for the correct termination and cleanup of the pipeline. The `WindowEmitted` metric in [`OBSERVABILITY.md`](OBSERVABILITY.md) can be used to monitor how many windows are being produced by these stages.
+
+### Lifecycle Management
+
+Stream pipelines offer explicit methods to control their lifecycle: `Start()`, `Wait()`, `Stop()`, `Reset()`, and `HealthStatus()`.
+
+```go
+pipeline := /* ... build your StreamPipeline[I, O] ... */
+source := make(chan I)
+sink := make(chan O)
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel() // Ensure context is eventually cancelled
 
 // Start the pipeline (non-blocking)
+// This also calls Setup() on Initializer stages.
 err := pipeline.Start(ctx, source, sink)
 if err != nil {
     log.Fatalf("Failed to start pipeline: %v", err)
 }
+
+// (Feed data to source and read from sink in separate goroutines)
 
 // Wait for the pipeline to complete or encounter an error (blocking)
 if err := pipeline.Wait(); err != nil {
     log.Printf("Pipeline finished with error: %v", err)
 }
 
-// Gracefully stop the pipeline (can be called even if not Wait-ing)
-if err := pipeline.Stop(ctx); err != nil {
-	log.Printf("Error stopping pipeline: %v", err)
+// Reset the pipeline (calls Reset on Resettable stages)
+// This might be called if you intend to reuse the pipeline instance after a run,
+// though typically you'd stop and potentially restart.
+// Ensure the pipeline is in a state where Reset is appropriate (e.g., not actively running).
+if err := pipeline.Reset(context.Background()); err != nil {
+    log.Printf("Error resetting pipeline: %v", err)
+}
+
+// Check pipeline health (calls HealthStatus on HealthCheckable stages)
+// This can be called periodically or on demand.
+if healthErr := pipeline.HealthStatus(context.Background()); healthErr != nil {
+    log.Printf("Pipeline health check failed: %v", healthErr)
+}
+
+// Gracefully stop the pipeline (can be called even if not Wait-ing, or after Wait)
+// This also calls Close() on Closer stages.
+// The context here can be used for shutdown timeout.
+stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer stopCancel()
+if err := pipeline.Stop(stopCtx); err != nil {
+    log.Printf("Error stopping pipeline: %v", err)
 }
 ```
 
 *Key points*:
 
- - `Start`: Initializes the pipeline and launches processing goroutines (non-blocking).
- - `Wait`: Blocks until processing finishes (after the source channel is closed) or an error occurs.
- - `Stop`: Gracefully shuts down the pipeline, cancels any running goroutines, and calls `Stop` on any stages implementing the `Stopper` interface.
- - The global `Run` function is a helper that calls these three methods sequentially.
+ - `Start(ctx, source, sink)`: Initializes the pipeline, calls `Setup()` on `Initializer` stages, and launches processing goroutines (non-blocking).
+ - `Wait()`: Blocks until all processing is finished (typically after the source channel is closed and all items have propagated) or an unrecoverable error occurs within the pipeline.
+ - `Stop(ctx)`: Initiates a graceful shutdown of the pipeline. It cancels ongoing operations, ensures goroutines terminate, and calls `Close()` on `Closer` stages. The provided context can specify a timeout for the shutdown process.
+ - `Reset(ctx)`: Resets the internal state of the pipeline and calls `Reset()` on all stages implementing the `Resettable` interface. This is useful for pipelines that might be reused or need their state cleared without a full stop/start cycle. Ensure the pipeline is in an appropriate state (e.g., stopped or idle) before calling `Reset`.
+ - `HealthStatus(ctx)`: Checks the operational health of the pipeline. It calls `HealthStatus()` on all stages implementing the `HealthCheckable` interface and aggregates their statuses. This can provide insights into the well-being of individual components within the stream. An error return typically indicates one or more components are unhealthy.
+ - The global `Run(ctx, source, sink)` function is a convenience helper that calls `Start`, then `Wait`, and ensures `Stop` is called (e.g., in a defer block), simplifying common usage patterns.
 
- Errors during these lifecycle operations (like starting an already started pipeline or stopping with a timeout) are reported using specific types like `fluxus.ErrPipelineAlreadyStarted`, `fluxus.ErrPipelineNotStarted`, or `fluxus.PipelineLifecycleError`.
+Errors during these lifecycle operations (like starting an already started pipeline, or issues during `Setup`, `Close`, `Reset`, `HealthStatus` calls on stages) are reported. Specific error types like `fluxus.ErrPipelineAlreadyStarted`, `fluxus.ErrPipelineNotStarted`, or `fluxus.PipelineLifecycleError` might be used.
 
-### Starter and Stopper Stages
 
-Stages can optionally implement `Starter` and `Stopper` interfaces to manage resources:
+### Extended Stage Lifecycle Interfaces
+
+Stages within a `StreamPipeline` can implement various lifecycle interfaces to manage resources, initialize state, perform cleanup, reset, or report health. The `StreamPipeline` orchestrates these calls across its stages.
 
 ```go
-type Starter interface {
-	Start(ctx context.Context) error
+package fluxus
+import "context"
+
+// Initializer allows a stage to perform one-time setup or initialization tasks
+// when the pipeline starts.
+type Initializer interface {
+    Setup(ctx context.Context) error
 }
 
-type Stopper interface {
-	Stop(ctx context.Context) error
+// Closer allows a stage to release resources or perform final cleanup
+// when the pipeline stops.
+type Closer interface {
+    Close(ctx context.Context) error
+}
+
+// Resettable allows a stage's internal state to be reset.
+type Resettable interface {
+    Reset(ctx context.Context) error
+}
+
+// HealthCheckable allows a stage to report its current operational health.
+type HealthCheckable interface {
+    HealthStatus(ctx context.Context) error
 }
 ```
 
-The pipeline will call these methods when you call `pipeline.Start` and `pipeline.Stop`.
+When you manage a `StreamPipeline`:
+
+- `pipeline.Start(ctx, source, sink)` will call `Setup(ctx)` on `Initializer` stages.
+- `pipeline.Stop(ctx)` will call `Close(ctx)` on `Closer` stages.
+- `pipeline.Reset(ctx)` will call `Reset(ctx)` on `Resettable` stages.
+- `pipeline.HealthStatus(ctx)` will call `HealthStatus(ctx)` on `HealthCheckable` stages.
 
 ## Running Stream Pipelines
 

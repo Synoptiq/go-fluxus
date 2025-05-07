@@ -86,6 +86,7 @@ Fluxus includes extensive documentation to help you get started and make the mos
 - [Pipeline Documentation](PIPELINE.md) - Basic stage and pipeline concepts
 - [Stream Pipeline Documentation](STREAMPIPELINE.md) - Stream processing with backpressure
 - [Patterns Documentation](PATTERNS.md) - Fan-out/fan-in, MapReduce, etc.
+- [Building Stateful Stages](STATEFUL_STAGES.md) - Guidance and helpers for stateful components
 - [Resiliency Documentation](RESILIENCY.md) - Circuit breaker, retries, timeouts
 - [Observability Documentation](OBSERVABILITY.md) - Metrics and tracing
 - [Examples Documentation](EXAMPLES.md) - Practical examples and use cases

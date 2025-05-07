@@ -103,9 +103,10 @@ func (p *Pipeline[I, O]) Start(ctx context.Context) error {
 		return ErrPipelineAlreadyStarted // Use predefined
 	}
 
-	if starter, ok := p.stage.(Starter); ok {
-		if err := starter.Start(ctx); err != nil {
-			return NewPipelineLifecycleError("Start", "stage start failed", err)
+	// Call Initializer.Setup if implemented
+	if initializer, ok := p.stage.(Initializer); ok {
+		if err := initializer.Setup(ctx); err != nil {
+			return NewPipelineLifecycleError("Start", "stage setup failed", err)
 		}
 	}
 
@@ -128,17 +129,56 @@ func (p *Pipeline[I, O]) Stop(ctx context.Context) error {
 		return nil // Not an error to stop an already stopped pipeline
 	}
 
-	var stopErr error
-	if stopper, ok := p.stage.(Stopper); ok {
-		stopErr = stopper.Stop(ctx)
+	var collectedErrs []error
+
+	// Call Closer.Close if implemented
+	if closer, ok := p.stage.(Closer); ok {
+		if err := closer.Close(ctx); err != nil {
+			collectedErrs = append(collectedErrs, fmt.Errorf("stage close failed: %w", err))
+		}
 	}
 
 	p.started = false // Mark as stopped even if stopper errors
 
-	if stopErr != nil {
-		return NewPipelineLifecycleError("Stop", "stage stop failed", stopErr)
+	if len(collectedErrs) > 0 {
+		return NewPipelineLifecycleError("Stop", "stage close failed", NewMultiError(collectedErrs))
 	}
 	return nil
+}
+
+// Reset attempts to reset the pipeline and its underlying stage to an initial state.
+// If the underlying stage implements the Resettable interface, its Reset method is called.
+// The pipeline's own 'started' state is also reset, allowing it to be started again.
+// It is recommended to only call Reset on a pipeline that is not currently started.
+// If the pipeline is started, an error will be returned.
+func (p *Pipeline[I, O]) Reset(ctx context.Context) error {
+	p.startMu.Lock()
+	defer p.startMu.Unlock()
+
+	if p.started {
+		return NewPipelineLifecycleError("Reset", "cannot reset an already started pipeline", nil)
+	}
+
+	if resettable, ok := p.stage.(Resettable); ok {
+		if err := resettable.Reset(ctx); err != nil {
+			return NewPipelineLifecycleError("Reset", "failed to reset underlying stage", err)
+		}
+	}
+
+	// p.started is already false if we passed the check above.
+	// If we allowed resetting a started pipeline after stopping it, we'd set it here.
+	// For now, strict check: must not be started.
+	return nil
+}
+
+// HealthStatus returns the health status of the pipeline.
+// If the underlying stage implements the HealthCheckable interface, its HealthStatus is returned.
+// Otherwise, nil is returned, indicating the pipeline structure itself is sound.
+func (p *Pipeline[I, O]) HealthStatus(ctx context.Context) error {
+	if healthCheckable, ok := p.stage.(HealthCheckable); ok {
+		return healthCheckable.HealthStatus(ctx)
+	}
+	return nil // Default to healthy if stage is not HealthCheckable
 }
 
 // --- Stream Pipeline Configuration ---
@@ -270,6 +310,20 @@ type runnableStage struct {
 	originalStage interface{}
 }
 
+// --- Internal Lifecycle Helper Structs ---
+
+// namedInitializer associates an Initializer with its stage name.
+type namedInitializer struct {
+	Initializer
+	name string
+}
+
+// namedCloser associates a Closer with its stage name.
+type namedCloser struct {
+	Closer
+	name string
+}
+
 // --- Stream Pipeline Builder ---
 
 // StreamPipelineBuilder facilitates the type-safe construction of a multi-stage StreamPipeline.
@@ -277,10 +331,11 @@ type runnableStage struct {
 // of one stage matches the input type of the next stage at compile time.
 // The generic parameter `LastOutput` tracks the expected input type for the *next* stage to be added.
 type StreamPipelineBuilder[LastOutput any] struct {
-	stages   []runnableStage       // Sequentially ordered list of stages to be run.
-	cfg      *streamPipelineConfig // Configuration applied to the pipeline and default for adapters.
-	starters []Starter             // List of stages implementing the Starter interface.
-	stoppers []Stopper             // List of stages implementing the Stopper interface.
+	stages []runnableStage       // Sequentially ordered list of stages to be run.
+	cfg    *streamPipelineConfig // Configuration applied to the pipeline and default for adapters.
+	// --- New Lifecycle Interface Collections ---
+	initializers []namedInitializer
+	closers      []namedCloser
 }
 
 // NewStreamPipeline creates a new StreamPipelineBuilder to start building a pipeline.
@@ -306,10 +361,10 @@ func NewStreamPipeline[I any](options ...StreamPipelineOption) *StreamPipelineBu
 	// Although no stages are added yet, the builder is typed to expect
 	// a stage consuming type 'I' next.
 	return &StreamPipelineBuilder[I]{
-		stages:   make([]runnableStage, 0),
-		cfg:      cfg,
-		starters: make([]Starter, 0),
-		stoppers: make([]Stopper, 0),
+		stages:       make([]runnableStage, 0),
+		cfg:          cfg,
+		initializers: make([]namedInitializer, 0),
+		closers:      make([]namedCloser, 0),
 	}
 }
 
@@ -346,13 +401,14 @@ func AddStage[CurrentOutput, NextOutput any](
 	outType := reflect.TypeOf((*NextOutput)(nil)).Elem()
 
 	// --- Interface Checks ---
-	var stageAsStarter Starter
-	var stageAsStopper Stopper
-	if s, ok := stage.(Starter); ok {
-		stageAsStarter = s
+	var stageAsInitializer Initializer
+	var stageAsCloser Closer
+
+	if s, ok := stage.(Initializer); ok {
+		stageAsInitializer = s
 	}
-	if s, ok := stage.(Stopper); ok {
-		stageAsStopper = s
+	if s, ok := stage.(Closer); ok {
+		stageAsCloser = s
 	}
 	// --- End Interface Checks ---
 
@@ -418,22 +474,22 @@ func AddStage[CurrentOutput, NextOutput any](
 	}
 
 	// --- Add to builder lists ---
-	newStarters := builder.starters
-	if stageAsStarter != nil {
-		newStarters = append(newStarters, stageAsStarter)
+	newInitializers := builder.initializers
+	if stageAsInitializer != nil {
+		newInitializers = append(newInitializers, namedInitializer{Initializer: stageAsInitializer, name: name})
 	}
-	newStoppers := builder.stoppers
-	if stageAsStopper != nil {
-		newStoppers = append(newStoppers, stageAsStopper)
+	newClosers := builder.closers
+	if stageAsCloser != nil {
+		newClosers = append(newClosers, namedCloser{Closer: stageAsCloser, name: name})
 	}
 	// --- End Add to builder lists ---
 
 	// Return a new builder instance with the updated stage list and output type
 	return &StreamPipelineBuilder[NextOutput]{
-		stages:   append(builder.stages, newRunnable),
-		cfg:      builder.cfg,
-		starters: newStarters,
-		stoppers: newStoppers,
+		stages:       append(builder.stages, newRunnable),
+		cfg:          builder.cfg,
+		initializers: newInitializers,
+		closers:      newClosers,
 	}
 }
 
@@ -474,13 +530,13 @@ func AddStreamStage[CurrentOutput, NextOutput any](
 	outType := reflect.TypeOf((*NextOutput)(nil)).Elem()
 
 	// --- Interface Checks ---
-	var stageAsStarter Starter
-	var stageAsStopper Stopper
-	if s, ok := stage.(Starter); ok {
-		stageAsStarter = s
+	var stageAsInitializer Initializer
+	var stageAsCloser Closer
+	if s, ok := stage.(Initializer); ok {
+		stageAsInitializer = s
 	}
-	if s, ok := stage.(Stopper); ok {
-		stageAsStopper = s
+	if s, ok := stage.(Closer); ok {
+		stageAsCloser = s
 	}
 	// --- End Interface Checks ---
 
@@ -529,22 +585,23 @@ func AddStreamStage[CurrentOutput, NextOutput any](
 	}
 
 	// --- Add to builder lists ---
-	newStarters := builder.starters
-	if stageAsStarter != nil {
-		newStarters = append(newStarters, stageAsStarter)
+	newInitializers := builder.initializers
+	if stageAsInitializer != nil {
+		newInitializers = append(newInitializers, namedInitializer{Initializer: stageAsInitializer, name: name})
 	}
-	newStoppers := builder.stoppers
-	if stageAsStopper != nil {
-		newStoppers = append(newStoppers, stageAsStopper)
+
+	newClosers := builder.closers
+	if stageAsCloser != nil {
+		newClosers = append(newClosers, namedCloser{Closer: stageAsCloser, name: name})
 	}
 	// --- End Add to builder lists ---
 
 	// Return a new builder instance
 	return &StreamPipelineBuilder[NextOutput]{
-		stages:   append(builder.stages, newRunnable),
-		cfg:      builder.cfg,
-		starters: newStarters,
-		stoppers: newStoppers,
+		stages:       append(builder.stages, newRunnable),
+		cfg:          builder.cfg,
+		initializers: newInitializers,
+		closers:      newClosers,
 	}
 }
 
@@ -579,8 +636,8 @@ type StreamPipeline[I, O any] struct {
 	started  atomic.Bool        // Tracks if the pipeline is currently running (atomic for potential read checks)
 
 	// Store stages that need lifecycle management
-	starters []Starter
-	stoppers []Stopper
+	initializers []namedInitializer
+	closers      []namedCloser
 	// --- End New Lifecycle Fields ---
 
 	pipelineSpan trace.Span // Span for the overall pipeline run
@@ -615,11 +672,11 @@ func Finalize[I, O any](builder *StreamPipelineBuilder[O]) (*StreamPipeline[I, O
 	// --- End Optional Sanity Check ---
 
 	return &StreamPipeline[I, O]{
-		stages:   builder.stages,
-		cfg:      builder.cfg,
-		starters: append([]Starter(nil), builder.starters...), // Copy slices
-		stoppers: append([]Stopper(nil), builder.stoppers...), // Copy slices
-		stopCh:   make(chan struct{}),                         // Initialize stopCh here or in Start
+		stages:       builder.stages,
+		cfg:          builder.cfg,
+		initializers: append([]namedInitializer(nil), builder.initializers...), // Copy slices
+		closers:      append([]namedCloser(nil), builder.closers...),           // Copy slices
+		stopCh:       make(chan struct{}),                                      // Initialize stopCh here or in Start
 	}, nil
 }
 
@@ -690,36 +747,41 @@ func (p *StreamPipeline[I, O]) initializeRunState(pipelineCtx context.Context) c
 	return gctx    // Return the group's context for stages
 }
 
-// startStarterStages iterates through the collected Starter stages and calls their Start methods
-// sequentially. It uses the errgroup's context (gctx) so that starting stages respect
-// pipeline cancellation. If any Starter fails, it attempts to gracefully stop any
-// previously started Starters (using the original context for timeout) and returns an error,
+// setupInitializers iterates through Initializer stages.
+// sequentially. It uses the errgroup's context (gctx) so that setup respects
+// pipeline cancellation. If any Initializer fails, it attempts to gracefully close any
+// previously setup Initializers (using the original context for timeout) and returns an error,
 // after finalizing observability fields to indicate the failed start.
-func (p *StreamPipeline[I, O]) startStarterStages(
-	ctx context.Context,
+func (p *StreamPipeline[I, O]) setupInitializers(
 	gctx context.Context,
 	pipelineSpan trace.Span,
 	isRealCollector bool,
 	startTime time.Time,
 ) error {
-	p.cfg.logger.Printf("DEBUG: Starting Starter stages for pipeline '%s'...", p.cfg.pipelineName)
-	for i, starter := range p.starters {
-		err := starter.Start(gctx) // Use group context
+	p.cfg.logger.Printf("DEBUG: Setting up Initializer stages for pipeline '%s'...", p.cfg.pipelineName)
+	for i, ni := range p.initializers { // Use p.initializers
+		err := ni.Initializer.Setup(gctx) // Call Setup()
 		if err != nil {
-			// If a starter fails, perform cleanup
-			p.cfg.logger.Printf("ERROR: Failed to start stage %d: %v. Attempting cleanup...", i, err)
-			if p.cancelFn != nil { // Ensure cancelFn is available before calling
+			// If an initializer fails, the Start operation fails.
+			// Cleanup of other resources (via Closer) is typically handled by a subsequent Stop call on the pipeline.
+			p.cfg.logger.Printf(
+				"ERROR: Failed to setup initializer stage '%s' (index %d in initializers list): %v.",
+				ni.name,
+				i,
+				err,
+			)
+			// Ensure cancelFn is available before calling
+			if p.cancelFn != nil {
 				p.cancelFn()
 			}
-			_ = p.stopStoppers(
-				ctx,
-				i-1,
-			) // Stop stages started before the failed one (use original ctx for stop timeout)
+
+			// Removed direct call to stop/close other stages here.
+			// The pipeline's Stop method will handle closing all registered Closers.
 
 			// Finalize observability for failed start
 			if pipelineSpan != nil {
 				pipelineSpan.RecordError(err)
-				pipelineSpan.SetStatus(codes.Error, "failed to start starter stage")
+				pipelineSpan.SetStatus(codes.Error, "stage setup failed")
 				pipelineSpan.End()
 			}
 			if isRealCollector && p.cfg.metricsCollector != nil {
@@ -727,15 +789,17 @@ func (p *StreamPipeline[I, O]) startStarterStages(
 					context.Background(),
 					p.cfg.pipelineName,
 					time.Since(startTime),
-					err,
+					err, // The original error from Setup
 				)
 			}
 
-			wrappedErr := fmt.Errorf("failed to start stage %d: %w", i, err)
-			return NewPipelineLifecycleError("Start", "stage initialization failed", wrappedErr)
+			// Wrap error with stage info if possible (p.initializers might not directly map to p.stages if not all stages are initializers)
+			wrappedErr := fmt.Errorf("failed to setup initializer stage '%s' (index %d): %w", ni.name, i, err)
+			return NewPipelineLifecycleError("Start", "stage setup failed", wrappedErr)
 		}
 	}
-	p.cfg.logger.Printf("DEBUG: Starter stages started successfully for pipeline '%s'.", p.cfg.pipelineName)
+
+	p.cfg.logger.Printf("DEBUG: Initializer stages set up successfully for pipeline '%s'.", p.cfg.pipelineName)
 	return nil
 }
 
@@ -853,7 +917,7 @@ func (p *StreamPipeline[I, O]) Start(ctx context.Context, source <-chan I, sink 
 	gctx := p.initializeRunState(pipelineCtx) // Get the group's context
 
 	// 4. Start Starter Stages (handles its own cleanup on failure)
-	if err := p.startStarterStages(ctx, gctx, pipelineSpan, isRealCollector, startTime); err != nil {
+	if err := p.setupInitializers(gctx, pipelineSpan, isRealCollector, startTime); err != nil {
 		// Error already wrapped, observability handled within the helper on failure
 		return err
 	}
@@ -938,7 +1002,17 @@ func (p *StreamPipeline[I, O]) Wait() (runErr error) {
 		// Attempt to stop stoppers here as well, in case Wait finished naturally
 		// before Stop was called. Stop will handle its own context/timeout.
 		// Use a background context for this cleanup initiated by Wait finishing.
-		_ = p.stopStoppers(context.Background(), len(p.stoppers)-1)
+		closeErr := p.closeClosers(context.Background(), len(p.closers)-1) // Use p.closers
+		if closeErr != nil {
+			p.cfg.logger.Printf("ERROR: Error closing stages during Wait cleanup: %v", closeErr)
+			if runErr == nil {
+				runErr = NewPipelineLifecycleError("Wait.cleanup", "failed to close stages", closeErr)
+			} else {
+				// If runErr already exists, we might wrap it or log this additional error.
+				// For now, prioritize the original runErr but log the closeErr.
+				p.cfg.logger.Printf("DEBUG: Pipeline already had error '%v', additionally failed to close stages: %v", runErr, closeErr)
+			}
+		}
 
 		// Clean up context if we own it (i.e., if Stop wasn't called first)
 		if p.cancelFn != nil {
@@ -1041,19 +1115,23 @@ func (p *StreamPipeline[I, O]) Stop(ctx context.Context) (stopErr error) {
 			// Don't return yet, proceed to stop stoppers
 		}
 
-		// 3. Stop the Stopper stages (in reverse order of starting)
-		// Use the Stop context for stopping these stages too.
-		p.cfg.logger.Printf("DEBUG: Stopping Stopper stages for pipeline '%s'.", p.cfg.pipelineName)
-		stopperErr := p.stopStoppers(ctx, len(p.stoppers)-1)
-		if stopperErr != nil {
+		// 3. Close the Closer stages (in reverse order of registration)
+		// Use the Stop context for closing these stages too.
+		p.cfg.logger.Printf("DEBUG: Closing Closer stages for pipeline '%s'.", p.cfg.pipelineName)
+
+		closeErr := p.closeClosers(ctx, len(p.closers)-1) // Use p.closers
+
+		if closeErr != nil {
 			p.cfg.logger.Printf(
-				"ERROR: Error stopping stopper stages for pipeline '%s': %v",
+				"ERROR: Error closing closer stages for pipeline '%s': %v",
 				p.cfg.pipelineName,
-				stopperErr,
+				closeErr,
 			)
 			if stopErr == nil { // Keep the first error (timeout or stopper error)
-				stopErr = NewPipelineLifecycleError("Stop", "failed to stop stages", stopperErr) // Wrap the MultiError
+				stopErr = NewPipelineLifecycleError("Stop", "failed to close stages", closeErr) // Wrap the MultiError
 			}
+		} else if stopErr == nil { // If no timeout error, but groupWaitErr occurred, it should be the stopErr
+			stopErr = groupWaitErr // Propagate pipeline execution error if stop itself was clean
 		}
 
 		// 4. Finalize metrics and tracing (if not already done by Wait)
@@ -1090,29 +1168,38 @@ func (p *StreamPipeline[I, O]) Stop(ctx context.Context) (stopErr error) {
 	return stopErr
 }
 
-// Helper function to call Stop on Stopper stages in reverse order.
-// It collects errors into a MultiError if multiple stoppers fail.
-// Uses the provided context for cancellation/timeout of the stop calls.
-func (p *StreamPipeline[I, O]) stopStoppers(ctx context.Context, lastIndex int) error {
+// closeClosers calls Close on Closer stages in reverse order of their registration.
+// It collects errors into a MultiError if multiple closers fail.
+// Uses the provided context for cancellation/timeout of the Close calls.
+func (p *StreamPipeline[I, O]) closeClosers(ctx context.Context, lastIndex int) error {
 	var multiErr *MultiError // Assuming you have or will create a MultiError type
 	for i := lastIndex; i >= 0; i-- {
-		stopper := p.stoppers[i]
-		p.cfg.logger.Printf("DEBUG: Stopping stage %d...", i)
-		// Apply stop context to individual stage stop
-		if err := stopper.Stop(ctx); err != nil {
-			p.cfg.logger.Printf("ERROR: Failed to stop stage %d: %v", i, err)
+		nc := p.closers[i]                                                         // nc is namedCloser
+		p.cfg.logger.Printf("DEBUG: Closing stage '%s' (index %d)...", nc.name, i) // Log message update
+		// Apply close context to individual stage close
+		if err := nc.Closer.Close(ctx); err != nil { // Call Close()
+			p.cfg.logger.Printf(
+				"ERROR: Failed to close stage '%s' (index %d): %v",
+				nc.name,
+				i,
+				err,
+			) // Log message update
 			if multiErr == nil {
 				multiErr = &MultiError{Errors: make([]error, 0)} // Initialize with an empty slice
 			}
-			multiErr.Add(fmt.Errorf("failed to stop stage %d: %w", i, err))
-			// Continue stopping others even if one fails
+			multiErr.Add(
+				fmt.Errorf("failed to close stage '%s' (index %d): %w", nc.name, i, err),
+			) // Error message update
+			// Continue closing others even if one fails
 		} else {
-			p.cfg.logger.Printf("DEBUG: Stopped stage %d successfully.", i)
+			p.cfg.logger.Printf("DEBUG: Closed stage '%s' (index %d) successfully.", nc.name, i) // Log message update
 		}
 	}
+
 	if multiErr != nil && multiErr.HasErrors() {
 		return multiErr
 	}
+
 	return nil
 }
 
@@ -1144,6 +1231,87 @@ func (p *StreamPipeline[I, O]) Run(ctx context.Context, source <-chan I, sink ch
 	}
 
 	return runErr // Return the error from the pipeline's execution (Wait)
+}
+
+// Reset attempts to reset the StreamPipeline and all its constituent stages
+// that implement the Resettable interface.
+// This method should only be called when the pipeline is NOT running (i.e., after
+// Stop() has completed or before Start() has been called).
+// It resets internal state to allow the pipeline to be started again cleanly.
+// Returns a MultiError if any of the resettable stages fail to reset.
+func (p *StreamPipeline[I, O]) Reset(ctx context.Context) error {
+	p.startMu.Lock()
+	defer p.startMu.Unlock()
+
+	if p.started.Load() {
+		return NewPipelineLifecycleError("Reset", "cannot reset a running pipeline", nil)
+	}
+
+	p.cfg.logger.Printf("DEBUG: Resetting pipeline '%s'...", p.cfg.pipelineName)
+
+	var multiErr *MultiError
+	for i, rStage := range p.stages {
+		if original, ok := rStage.originalStage.(Resettable); ok {
+			p.cfg.logger.Printf("DEBUG: Resetting stage '%s' (index %d)...", rStage.name, i)
+			if err := original.Reset(ctx); err != nil {
+				p.cfg.logger.Printf("ERROR: Failed to reset stage '%s' (index %d): %v", rStage.name, i, err)
+				if multiErr == nil {
+					multiErr = NewMultiError(nil) // Initialize if first error
+				}
+				multiErr.Add(NewStageError(rStage.name, i, fmt.Errorf("reset failed: %w", err)))
+			}
+		}
+	}
+
+	// Reset pipeline's own lifecycle state for a fresh Start
+	p.stopOnce = sync.Once{} // Critical for allowing Stop/Wait to work again
+	p.runGroup = nil
+	p.runCtx = nil
+	if p.cancelFn != nil { // Call previous cancelFn if it exists, to be safe
+		p.cancelFn()
+	}
+	p.cancelFn = nil
+	p.pipelineSpan = nil
+	p.startTime = time.Time{}
+	// p.started is already false
+
+	p.cfg.logger.Printf("INFO: Pipeline '%s' reset complete.", p.cfg.pipelineName)
+	if multiErr.HasErrors() {
+		return NewPipelineLifecycleError("Reset", "one or more stages failed to reset", multiErr)
+	}
+	return nil
+}
+
+// HealthStatus checks the health of the StreamPipeline and its constituent stages.
+// It iterates through all stages. If a stage implements HealthCheckable, its
+// HealthStatus is checked.
+// Returns a MultiError containing all reported health issues. If all stages are
+// healthy (or not HealthCheckable), it returns nil.
+// The pipeline's own running state is not directly part of this health check,
+// as 'health' here pertains to the components' operational readiness/status.
+func (p *StreamPipeline[I, O]) HealthStatus(ctx context.Context) error {
+	p.cfg.logger.Printf("DEBUG: Checking health for pipeline '%s'...", p.cfg.pipelineName)
+	var multiErr *MultiError
+
+	// Check health of individual stages
+	for i, rStage := range p.stages {
+		if original, ok := rStage.originalStage.(HealthCheckable); ok {
+			if err := original.HealthStatus(ctx); err != nil {
+				p.cfg.logger.Printf("WARN: Stage '%s' (index %d) reported unhealthy: %v", rStage.name, i, err)
+				if multiErr == nil {
+					multiErr = NewMultiError(nil) // Initialize if first error
+				}
+				multiErr.Add(NewStageError(rStage.name, i, fmt.Errorf("health check failed: %w", err)))
+			}
+		}
+	}
+
+	if multiErr.HasErrors() {
+		return NewPipelineLifecycleError("HealthStatus", "one or more stages unhealthy", multiErr)
+	}
+
+	p.cfg.logger.Printf("DEBUG: Pipeline '%s' reported as healthy.", p.cfg.pipelineName)
+	return nil
 }
 
 // castChannelToReadable attempts to cast an interface{} to a readable channel of type T.
