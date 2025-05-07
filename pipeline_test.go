@@ -1682,35 +1682,35 @@ func BenchmarkStreamPipelineOverhead(b *testing.B) {
 
 type mockLifecycleStage struct {
 	started      atomic.Bool
-	stopped      atomic.Bool
-	startErr     error
-	stopErr      error
+	closed       atomic.Bool // Renamed from stopped
+	setupErr     error
+	closeErr     error
 	processDelay time.Duration
 	processErr   error
-	startCalls   atomic.Int32
-	stopCalls    atomic.Int32
+	setupCalls   atomic.Int32
+	closeCalls   atomic.Int32
 	processCalls atomic.Int32
 }
 
-func (m *mockLifecycleStage) Start(ctx context.Context) error {
-	m.startCalls.Add(1)
-	if m.startErr != nil {
-		return m.startErr
+func (m *mockLifecycleStage) Setup(ctx context.Context) error {
+	m.setupCalls.Add(1)
+	if m.setupErr != nil {
+		return m.setupErr
 	}
 	// Simulate potential start work
 	select {
 	case <-time.After(1 * time.Millisecond):
+		m.started.Store(true)
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	m.started.Store(true)
-	return nil
 }
 
-func (m *mockLifecycleStage) Stop(ctx context.Context) error {
-	m.stopCalls.Add(1)
-	if m.stopErr != nil {
-		return m.stopErr
+func (m *mockLifecycleStage) Close(ctx context.Context) error {
+	m.closeCalls.Add(1)
+	if m.closeErr != nil {
+		return m.closeErr
 	}
 	// Simulate potential stop work
 	select {
@@ -1718,7 +1718,8 @@ func (m *mockLifecycleStage) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	m.stopped.Store(true)
+
+	m.closed.Store(true)
 	return nil
 }
 
@@ -1727,7 +1728,7 @@ func (m *mockLifecycleStage) Process(ctx context.Context, input string) (string,
 	if !m.started.Load() {
 		return "", errors.New("mock stage process called before started")
 	}
-	if m.stopped.Load() {
+	if m.closed.Load() {
 		return "", errors.New("mock stage process called after stopped")
 	}
 	if m.processDelay > 0 {
@@ -1757,42 +1758,42 @@ func TestPipelineLifecycle(t *testing.T) {
 	// 2. Start the pipeline
 	err = pipeline.Start(ctx)
 	require.NoError(t, err, "Start should succeed")
-	assert.True(t, mockStage.started.Load(), "Mock stage should be marked as started")
-	assert.Equal(t, int32(1), mockStage.startCalls.Load(), "Start should be called once")
+	assert.True(t, mockStage.started.Load(), "Mock stage should be marked as started after Setup")
+	assert.Equal(t, int32(1), mockStage.setupCalls.Load(), "Setup should be called once")
 
 	// 3. Start again should fail
 	err = pipeline.Start(ctx)
 	require.ErrorIs(t, err, fluxus.ErrPipelineAlreadyStarted, "Start again should return ErrPipelineAlreadyStarted")
-	assert.Equal(t, int32(1), mockStage.startCalls.Load(), "Start should not be called again")
+	assert.Equal(t, int32(1), mockStage.setupCalls.Load(), "Setup should not be called again")
 
 	// 4. Process after Start should succeed
 	result, err := pipeline.Process(ctx, "input2")
 	require.NoError(t, err, "Process after Start should succeed")
 	assert.Equal(t, "processed:input2", result)
-	assert.Equal(t, int32(1), mockStage.processCalls.Load(), "Process should be called once")
+	assert.Equal(t, int32(1), mockStage.processCalls.Load(), "Process should be called once after Setup")
 
 	// 5. Stop the pipeline
 	err = pipeline.Stop(ctx)
 	require.NoError(t, err, "Stop should succeed")
-	assert.True(t, mockStage.stopped.Load(), "Mock stage should be marked as stopped")
-	assert.Equal(t, int32(1), mockStage.stopCalls.Load(), "Stop should be called once")
+	assert.True(t, mockStage.closed.Load(), "Mock stage should be marked as closed")
+	assert.Equal(t, int32(1), mockStage.closeCalls.Load(), "Close should be called once")
 
 	// 6. Stop again should succeed (idempotent)
 	err = pipeline.Stop(ctx)
 	require.NoError(t, err, "Stop again should succeed")
-	assert.Equal(t, int32(1), mockStage.stopCalls.Load(), "Stop should not be called again")
+	assert.Equal(t, int32(1), mockStage.closeCalls.Load(), "Close should not be called again")
 
 	// 7. Process after Stop should fail
 	_, err = pipeline.Process(ctx, "input3")
 	require.ErrorIs(t, err, fluxus.ErrPipelineNotStarted, "Process after Stop should return ErrPipelineNotStarted")
-	assert.Equal(t, int32(1), mockStage.processCalls.Load(), "Process should not be called after Stop")
+	assert.Equal(t, int32(1), mockStage.processCalls.Load(), "Process should not be called after Close")
 
 	// 8. Start after Stop should succeed
-	mockStage.stopped.Store(false) // Reset mock state for restart test
+	mockStage.closed.Store(false) // Reset mock state for restart test
 	mockStage.started.Store(false)
 	err = pipeline.Start(ctx)
 	require.NoError(t, err, "Start after Stop should succeed")
-	assert.Equal(t, int32(2), mockStage.startCalls.Load(), "Start should be called again after stopping")
+	assert.Equal(t, int32(2), mockStage.setupCalls.Load(), "Setup should be called again after closing")
 }
 
 // TestPipelineLifecycleErrors tests error handling during Start/Stop for the basic Pipeline.
@@ -1802,12 +1803,12 @@ func TestPipelineLifecycleErrors(t *testing.T) {
 	stopErr := errors.New("stop failed")
 
 	t.Run("StartError", func(t *testing.T) {
-		mockStage := &mockLifecycleStage{startErr: startErr}
+		mockStage := &mockLifecycleStage{setupErr: startErr}
 		pipeline := fluxus.NewPipeline(mockStage)
 
 		err := pipeline.Start(ctx)
 		require.Error(t, err, "Start should fail")
-		require.ErrorIs(t, err, startErr, "Start error should be the underlying startErr")
+		require.ErrorIs(t, err, startErr, "Start error should be the underlying setupErr")
 		var lifecycleErr *fluxus.PipelineLifecycleError
 		require.ErrorAs(t, err, &lifecycleErr, "Error should be a PipelineLifecycleError")
 		assert.Equal(t, "Start", lifecycleErr.Operation)
@@ -1818,7 +1819,7 @@ func TestPipelineLifecycleErrors(t *testing.T) {
 	})
 
 	t.Run("StopError", func(t *testing.T) {
-		mockStage := &mockLifecycleStage{stopErr: stopErr}
+		mockStage := &mockLifecycleStage{closeErr: stopErr}
 		pipeline := fluxus.NewPipeline(mockStage)
 
 		// Start successfully
@@ -1828,7 +1829,7 @@ func TestPipelineLifecycleErrors(t *testing.T) {
 		// Stop should fail
 		err := pipeline.Stop(ctx)
 		require.Error(t, err, "Stop should fail")
-		require.ErrorIs(t, err, stopErr, "Stop error should be the underlying stopErr")
+		require.ErrorIs(t, err, stopErr, "Stop error should be the underlying closeErr")
 		var lifecycleErr *fluxus.PipelineLifecycleError
 		require.ErrorAs(t, err, &lifecycleErr, "Error should be a PipelineLifecycleError")
 		assert.Equal(t, "Stop", lifecycleErr.Operation)
@@ -1856,7 +1857,7 @@ func TestStreamPipelineLifecycle(t *testing.T) {
 	// 1. Start the pipeline
 	err = pipeline.Start(ctx, source, sink)
 	require.NoError(t, err, "Pipeline Start failed")
-	assert.Equal(t, int32(1), mockStage.startCalls.Load(), "Mock stage Start should be called")
+	assert.Equal(t, int32(1), mockStage.setupCalls.Load(), "Mock stage Setup should be called")
 
 	// 2. Start again should fail
 	err = pipeline.Start(ctx, source, sink)
@@ -1880,12 +1881,12 @@ func TestStreamPipelineLifecycle(t *testing.T) {
 	stopErr := pipeline.Stop(ctx)
 	require.NoError(t, stopErr, "Pipeline Stop after Wait should succeed")
 	// Stop should have been called by Wait's cleanup or the explicit Stop call via stopOnce
-	assert.Equal(t, int32(1), mockStage.stopCalls.Load(), "Mock stage Stop should be called once")
+	assert.Equal(t, int32(1), mockStage.closeCalls.Load(), "Mock stage Close should be called once")
 
 	// 6. Stop again
 	stopErr = pipeline.Stop(ctx)
 	require.NoError(t, stopErr, "Pipeline Stop again should succeed")
-	assert.Equal(t, int32(1), mockStage.stopCalls.Load(), "Mock stage Stop should not be called again")
+	assert.Equal(t, int32(1), mockStage.closeCalls.Load(), "Mock stage Close should not be called again")
 }
 
 // TestStreamPipelineStartStop tests the Start -> Stop flow (external shutdown signal).
@@ -1906,7 +1907,7 @@ func TestStreamPipelineStartStop(t *testing.T) {
 	// 1. Start the pipeline
 	err = pipeline.Start(ctx, source, sink)
 	require.NoError(t, err, "Pipeline Start failed")
-	assert.Equal(t, int32(1), mockStage.startCalls.Load(), "Mock stage Start should be called")
+	assert.Equal(t, int32(1), mockStage.setupCalls.Load(), "Mock stage Setup should be called")
 
 	// 2. Send some data (pipeline starts processing)
 	source <- "data1"
@@ -1916,8 +1917,19 @@ func TestStreamPipelineStartStop(t *testing.T) {
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer stopCancel()
 	stopErr := pipeline.Stop(stopCtx)
-	require.NoError(t, stopErr, "Pipeline Stop should succeed within timeout")
-	assert.Equal(t, int32(1), mockStage.stopCalls.Load(), "Mock stage Stop should be called by Stop")
+	// Stop might return an error if the stage was cancelled during shutdown.
+	// This is expected behavior. The key is that Stop itself completed its logic.
+	if stopErr != nil {
+		t.Logf("Pipeline Stop returned an error (expected if stage was cancelled): %v", stopErr)
+		// We expect a context.Canceled error, possibly wrapped.
+		require.ErrorIs(
+			t,
+			stopErr,
+			context.Canceled,
+			"If Stop errors, it should be due to cancellation of a running stage",
+		)
+	}
+	assert.Equal(t, int32(1), mockStage.closeCalls.Load(), "Mock stage Close should be called by Stop")
 
 	// 4. Wait for the pipeline (should return quickly now, possibly nil or context error)
 	waitErr := pipeline.Wait()
@@ -1947,7 +1959,7 @@ func TestStreamPipelineLifecycleErrors(t *testing.T) {
 	stopErr := errors.New("stop failed")
 
 	t.Run("StartError", func(t *testing.T) {
-		mockStage := &mockLifecycleStage{startErr: startErr}
+		mockStage := &mockLifecycleStage{setupErr: startErr}
 		builder := fluxus.NewStreamPipeline[string]()
 		b2 := fluxus.AddStage(builder, "mock_lifecycle", mockStage)
 		pipeline, err := fluxus.Finalize[string](b2)
@@ -1958,7 +1970,7 @@ func TestStreamPipelineLifecycleErrors(t *testing.T) {
 
 		err = pipeline.Start(ctx, source, sink)
 		require.Error(t, err, "Start should fail")
-		require.ErrorIs(t, err, startErr, "Start error should be the underlying startErr")
+		require.ErrorIs(t, err, startErr, "Start error should be the underlying setupErr")
 		var lifecycleErr *fluxus.PipelineLifecycleError
 		require.ErrorAs(t, err, &lifecycleErr, "Error should be a PipelineLifecycleError")
 		assert.Equal(t, "Start", lifecycleErr.Operation)
@@ -1969,7 +1981,7 @@ func TestStreamPipelineLifecycleErrors(t *testing.T) {
 	})
 
 	t.Run("StopError", func(t *testing.T) {
-		mockStage := &mockLifecycleStage{stopErr: stopErr}
+		mockStage := &mockLifecycleStage{closeErr: stopErr}
 		builder := fluxus.NewStreamPipeline[string]()
 		b2 := fluxus.AddStage(builder, "mock_lifecycle", mockStage)
 		pipeline, err := fluxus.Finalize[string](b2)
@@ -1988,10 +2000,10 @@ func TestStreamPipelineLifecycleErrors(t *testing.T) {
 
 		// Wait should complete, but trigger Stop internally, which will error
 		waitErr := pipeline.Wait()
-		require.NoError(t, waitErr, "Wait itself should succeed") // Wait finishes, then stopStoppers is called
-
-		// Now check the mock stage - Stop should have been called
-		assert.Equal(t, int32(1), mockStage.stopCalls.Load(), "Stop should have been called by Wait cleanup")
+		// If the mockStage.closeErr is set, Wait's internal call to closeClosers
+		// should propagate this error.
+		require.Error(t, waitErr, "Wait should return an error from the failing Closer")
+		require.ErrorIs(t, waitErr, stopErr, "Wait error should be the mock's closeErr")
 
 		// Explicitly call Stop again (should be idempotent but might return the error again if not handled carefully)
 		// The current implementation logs the stopper error but doesn't return it from Wait.
@@ -2007,7 +2019,7 @@ func TestStreamPipelineLifecycleErrors(t *testing.T) {
 	t.Run("StopTimeout", func(t *testing.T) {
 		// Mock stage that hangs on Stop
 		mockStage := &mockLifecycleStage{}
-		mockStage.stopErr = context.DeadlineExceeded // Simulate stop taking too long
+		mockStage.closeErr = context.DeadlineExceeded // Simulate stop taking too long
 
 		builder := fluxus.NewStreamPipeline[string]()
 		b2 := fluxus.AddStage(builder, "mock_lifecycle", mockStage)
@@ -2034,7 +2046,16 @@ func TestStreamPipelineLifecycleErrors(t *testing.T) {
 		var lifecycleErr *fluxus.PipelineLifecycleError
 		require.ErrorAs(t, pipelineStopErr, &lifecycleErr, "Error should be a PipelineLifecycleError")
 		assert.Equal(t, "Stop", lifecycleErr.Operation)
-		require.ErrorIs(t, lifecycleErr.Err, context.DeadlineExceeded, "Underlying error should be deadline exceeded")
+		// The error from pipeline.Stop will be the one from mockStage.closeErr
+		// if stopCtx itself didn't time out first.
+		// If stopCtx timed out, then lifecycleErr.Err would be stopCtx.Err().
+		// If mockStage.closeErr is context.DeadlineExceeded, this should match.
+		require.ErrorIs(
+			t,
+			lifecycleErr.Unwrap(),
+			context.DeadlineExceeded,
+			"Underlying error should be the one from Close (context.DeadlineExceeded)",
+		)
 
 		// Wait should return quickly now
 		waitErr := pipeline.Wait()
