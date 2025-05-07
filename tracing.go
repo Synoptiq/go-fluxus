@@ -216,6 +216,93 @@ func (tss *TracedStreamStage[T, O]) ProcessStream(ctx context.Context, in <-chan
 	return err
 }
 
+type tracedPipelineConfig[I, O any] struct {
+	name           string
+	tracerProvider TracerProvider
+	attributes     []attribute.KeyValue
+}
+
+type TracedPipelineOption[I, O any] func(*tracedPipelineConfig[I, O])
+
+// WithTracerPipelineName sets the name for the traced pipeline.
+func WithTracerPipelineName[T, O any](name string) TracedPipelineOption[T, O] {
+	return func(tss *tracedPipelineConfig[T, O]) {
+		if name != "" {
+			tss.name = name
+		}
+	}
+}
+
+// WithTracerPipelineProvider sets the TracerProvider for the TracedPipeline.
+func WithTracerPipelineProvider[T, O any](provider TracerProvider) TracedPipelineOption[T, O] {
+	return func(tss *tracedPipelineConfig[T, O]) {
+		if provider != nil {
+			tss.tracerProvider = provider
+		}
+	}
+}
+
+// WithTracerPipelineAttributes adds static attributes to all spans created by this TracedPipeline.
+func WithTracerPipelineAttributes[T, O any](attrs ...attribute.KeyValue) TracedPipelineOption[T, O] {
+	return func(tss *tracedPipelineConfig[T, O]) {
+		tss.attributes = append(tss.attributes, attrs...)
+	}
+}
+
+// NewTracedPipeline creates a traced wrapper around a Pipeline stage.
+func NewTracedPipeline[I, O any](
+	pipeline *Pipeline[I, O],
+	options ...TracedPipelineOption[I, O],
+) Stage[I, O] {
+	if pipeline == nil {
+		panic("fluxus.NewTracedPipeline: pipeline cannot be nil")
+	}
+
+	// For Pipeline, there aren't many "pipeline-specific" attributes from the Pipeline struct itself
+	// that NewTracedStage wouldn't already handle if passed as options.
+	// So, this can be a direct wrap.
+	// The TracedStageOption can be used to set the name to "traced_pipeline" or similar.
+
+	cfg := &tracedPipelineConfig[I, O]{
+		name:           "traced_pipeline",
+		tracerProvider: DefaultTracerProvider,
+		attributes:     []attribute.KeyValue{},
+	}
+
+	for _, option := range options {
+		option(cfg)
+	}
+
+	// Create the tracer instance based on the configured provider and name
+	tracer := cfg.tracerProvider.Tracer(fmt.Sprintf("fluxus/pipeline/%s", cfg.name))
+
+	return StageFunc[I, O](func(ctx context.Context, input I) (O, error) {
+		// Create a span for this pipeline execution
+		ctx, span := tracer.Start(
+			ctx,
+			cfg.name, // Use the configured pipeline name for the span
+			trace.WithAttributes(cfg.attributes...),
+		)
+		defer span.End()
+
+		startTime := time.Now()
+		var zero O // For returning in case of error
+
+		output, err := pipeline.Process(ctx, input) // Call the original pipeline
+
+		duration := time.Since(startTime)
+		span.SetAttributes(attribute.Int64("fluxus.pipeline.duration_ms", duration.Milliseconds()))
+
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return zero, err
+		}
+		span.SetStatus(codes.Ok, "")
+		return output, nil
+	})
+}
+
 // NewTracedMap creates a traced wrapper around a Map stage.
 func NewTracedMap[I, O any](
 	mapStage *Map[I, O],
@@ -513,30 +600,6 @@ func NewTracedMapReduce[I any, K comparable, V any, R any](
 	)
 
 	return NewTracedStage(intermediateStage, allOptions...)
-}
-
-// NewTracedPipeline creates a traced wrapper around a Pipeline stage.
-func NewTracedPipeline[I, O any](
-	pipeline *Pipeline[I, O],
-	options ...TracedStageOption[I, O],
-) Stage[I, O] {
-	if pipeline == nil {
-		panic("fluxus.NewTracedPipeline: pipeline cannot be nil")
-	}
-
-	// For Pipeline, there aren't many "pipeline-specific" attributes from the Pipeline struct itself
-	// that NewTracedStage wouldn't already handle if passed as options.
-	// So, this can be a direct wrap.
-	// The TracedStageOption can be used to set the name to "traced_pipeline" or similar.
-
-	// Default options for a pipeline trace
-	defaultPipelineOptions := []TracedStageOption[I, O]{
-		WithTracerStageName[I, O]("traced_pipeline"), // Default name
-		// Add other pipeline-specific default attributes here if any
-	}
-	allOptions := append(defaultPipelineOptions, options...)
-
-	return NewTracedStage(pipeline, allOptions...)
 }
 
 // NewTracedTumblingCountWindow creates a traced wrapper for TumblingCountWindow.
