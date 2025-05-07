@@ -369,6 +369,8 @@ func NewTracedFanOut[I, O any](
 		attribute.Int("fluxus.stage.num_stages", len(fanOut.stages)),
 		attribute.Int("fluxus.stage.concurrency", fanOut.concurrency),
 	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
 	allConstructionAttrs := append(configHolder.attributes, constructionTimeAttrs...)
 
 	// Intermediate stage to add output-dependent attributes
@@ -452,6 +454,8 @@ func NewTracedBuffer[I, O any](
 		attribute.Int("fluxus.stage.batch_size", buffer.batchSize),
 		// num_inputs is input-dependent, handled by intermediate stage
 	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
 	allConstructionAttrs := append(configHolder.attributes, constructionTimeAttrs...)
 
 	intermediateStage := StageFunc[[]I, []O](func(ctx context.Context, inputs []I) ([]O, error) {
@@ -495,6 +499,8 @@ func NewTracedRetry[I, O any](
 	constructionTimeAttrs := []attribute.KeyValue{
 		attribute.Int("fluxus.stage.max_attempts", retryStage.maxAttempts),
 	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
 	allConstructionAttrs := append(configHolder.attributes, constructionTimeAttrs...)
 
 	tracer := configHolder.tracerProvider.Tracer(fmt.Sprintf("fluxus/stage/%s", configHolder.name))

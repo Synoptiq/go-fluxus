@@ -578,6 +578,8 @@ func NewMetricatedMap[I, O any](
 	defaultOptions := []MetricatedStageOption[[]I, []O]{
 		WithMetricsStageName[[]I, []O]("metricated_map"),
 	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
 	allOptions := append(defaultOptions, options...)
 	return NewMetricatedStage(mapStage, allOptions...)
 }
@@ -594,6 +596,8 @@ func NewMetricatedMapReduce[I any, K comparable, V any, R any](
 	defaultOptions := []MetricatedStageOption[[]I, []R]{
 		WithMetricsStageName[[]I, []R]("metricated_map_reduce"),
 	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
 	allOptions := append(defaultOptions, options...)
 	return NewMetricatedStage(mapReduceStage, allOptions...)
 }
@@ -621,6 +625,7 @@ func NewMetricatedTumblingCountWindow[T any](
 		}
 	}
 
+	//nolint:gocritic // this is for clarity, not a linting issue
 	allOptions := append(
 		options, // Pass original options through
 		WithMetricsStreamStageName[T, []T](
@@ -652,6 +657,7 @@ func NewMetricatedTumblingTimeWindow[T any](
 		}
 	}
 
+	//nolint:gocritic // this is for clarity, not a linting issue
 	allOptions := append(
 		options,
 		WithMetricsStreamStageName[T, []T]("metricated_tumbling_time_window"),
@@ -680,6 +686,7 @@ func NewMetricatedSlidingCountWindow[T any](
 		}
 	}
 
+	//nolint:gocritic // this is for clarity, not a linting issue
 	allOptions := append(
 		options,
 		WithMetricsStreamStageName[T, []T]("metricated_sliding_count_window"),
@@ -708,6 +715,7 @@ func NewMetricatedSlidingTimeWindow[T any](
 		}
 	}
 
+	//nolint:gocritic // this is for clarity, not a linting issue
 	allOptions := append(
 		options,
 		WithMetricsStreamStageName[T, []T]("metricated_sliding_time_window"),
