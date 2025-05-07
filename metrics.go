@@ -300,7 +300,9 @@ func WithMetricsStreamCollector[T, O any](collector MetricsCollector) Metricated
 }
 
 // WithStreamEmitCallback sets a callback to be invoked for each item emitted by the stream stage.
-func WithStreamEmitCallback[T, O any](onEmit func(ctx context.Context, stageName string, emittedItem O)) MetricatedStreamStageOption[T, O] {
+func WithStreamEmitCallback[T, O any](
+	onEmit func(ctx context.Context, stageName string, emittedItem O),
+) MetricatedStreamStageOption[T, O] {
 	return func(mss *MetricatedStreamStage[T, O]) {
 		mss.onEmit = onEmit
 	}
@@ -597,7 +599,10 @@ func NewMetricatedMapReduce[I any, K comparable, V any, R any](
 }
 
 // NewMetricatedTumblingCountWindow creates a metricated wrapper for TumblingCountWindow.
-func NewMetricatedTumblingCountWindow[T any](windowStage *TumblingCountWindow[T], options ...MetricatedStreamStageOption[T, []T]) StreamStage[T, []T] {
+func NewMetricatedTumblingCountWindow[T any](
+	windowStage *TumblingCountWindow[T],
+	options ...MetricatedStreamStageOption[T, []T],
+) StreamStage[T, []T] {
 	if windowStage == nil {
 		panic("fluxus.NewMetricatedTumblingCountWindow: windowStage cannot be nil")
 	}
@@ -618,7 +623,9 @@ func NewMetricatedTumblingCountWindow[T any](windowStage *TumblingCountWindow[T]
 
 	allOptions := append(
 		options, // Pass original options through
-		WithMetricsStreamStageName[T, []T]("metricated_tumbling_count_window"), // Default name, can be overridden by user options
+		WithMetricsStreamStageName[T, []T](
+			"metricated_tumbling_count_window",
+		), // Default name, can be overridden by user options
 		WithStreamEmitCallback[T](emitCallback),
 	)
 
@@ -626,7 +633,10 @@ func NewMetricatedTumblingCountWindow[T any](windowStage *TumblingCountWindow[T]
 }
 
 // NewMetricatedTumblingTimeWindow creates a metricated wrapper for TumblingTimeWindow.
-func NewMetricatedTumblingTimeWindow[T any](windowStage *TumblingTimeWindow[T], options ...MetricatedStreamStageOption[T, []T]) StreamStage[T, []T] {
+func NewMetricatedTumblingTimeWindow[T any](
+	windowStage *TumblingTimeWindow[T],
+	options ...MetricatedStreamStageOption[T, []T],
+) StreamStage[T, []T] {
 	// Similar logic to NewMetricatedTumblingCountWindow for emitCallback
 	tempCfg := &MetricatedStreamStage[T, []T]{metricsCollector: DefaultMetricsCollector}
 
@@ -642,13 +652,20 @@ func NewMetricatedTumblingTimeWindow[T any](windowStage *TumblingTimeWindow[T], 
 		}
 	}
 
-	allOptions := append(options, WithMetricsStreamStageName[T, []T]("metricated_tumbling_time_window"), WithStreamEmitCallback[T](emitCallback))
+	allOptions := append(
+		options,
+		WithMetricsStreamStageName[T, []T]("metricated_tumbling_time_window"),
+		WithStreamEmitCallback[T](emitCallback),
+	)
 
 	return NewMetricatedStreamStage(windowStage, allOptions...)
 }
 
 // NewMetricatedSlidingCountWindow creates a metricated wrapper for SlidingCountWindow.
-func NewMetricatedSlidingCountWindow[T any](windowStage *SlidingCountWindow[T], options ...MetricatedStreamStageOption[T, []T]) StreamStage[T, []T] {
+func NewMetricatedSlidingCountWindow[T any](
+	windowStage *SlidingCountWindow[T],
+	options ...MetricatedStreamStageOption[T, []T],
+) StreamStage[T, []T] {
 	tempCfg := &MetricatedStreamStage[T, []T]{metricsCollector: DefaultMetricsCollector}
 
 	for _, opt := range options {
@@ -663,13 +680,20 @@ func NewMetricatedSlidingCountWindow[T any](windowStage *SlidingCountWindow[T], 
 		}
 	}
 
-	allOptions := append(options, WithMetricsStreamStageName[T, []T]("metricated_sliding_count_window"), WithStreamEmitCallback[T](emitCallback))
+	allOptions := append(
+		options,
+		WithMetricsStreamStageName[T, []T]("metricated_sliding_count_window"),
+		WithStreamEmitCallback[T](emitCallback),
+	)
 
 	return NewMetricatedStreamStage(windowStage, allOptions...)
 }
 
 // NewMetricatedSlidingTimeWindow creates a metricated wrapper for SlidingTimeWindow.
-func NewMetricatedSlidingTimeWindow[T any](windowStage *SlidingTimeWindow[T], options ...MetricatedStreamStageOption[T, []T]) StreamStage[T, []T] {
+func NewMetricatedSlidingTimeWindow[T any](
+	windowStage *SlidingTimeWindow[T],
+	options ...MetricatedStreamStageOption[T, []T],
+) StreamStage[T, []T] {
 	tempCfg := &MetricatedStreamStage[T, []T]{metricsCollector: DefaultMetricsCollector}
 
 	for _, opt := range options {
@@ -684,7 +708,11 @@ func NewMetricatedSlidingTimeWindow[T any](windowStage *SlidingTimeWindow[T], op
 		}
 	}
 
-	allOptions := append(options, WithMetricsStreamStageName[T, []T]("metricated_sliding_time_window"), WithStreamEmitCallback[T](emitCallback))
+	allOptions := append(
+		options,
+		WithMetricsStreamStageName[T, []T]("metricated_sliding_time_window"),
+		WithStreamEmitCallback[T](emitCallback),
+	)
 
 	return NewMetricatedStreamStage(windowStage, allOptions...)
 }

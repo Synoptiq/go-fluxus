@@ -169,7 +169,10 @@ func WithTracerStreamAttributes[T, O any](attrs ...attribute.KeyValue) TracedStr
 }
 
 // NewTracedStreamStage creates a new TracedStreamStage that wraps the given stream stage.
-func NewTracedStreamStage[T, O any](stage StreamStage[T, O], options ...TracedStreamStageOption[T, O]) StreamStage[T, O] {
+func NewTracedStreamStage[T, O any](
+	stage StreamStage[T, O],
+	options ...TracedStreamStageOption[T, O],
+) StreamStage[T, O] {
 	if stage == nil {
 		panic("fluxus.NewTracedStreamStage: stage cannot be nil")
 	}
