@@ -542,15 +542,13 @@ func BenchmarkTracedComponents(b *testing.B) {
 	// Benchmark traced pipeline
 	b.Run("TracedPipeline", func(b *testing.B) {
 		pipeline := fluxus.NewPipeline(simpleStage)
+
 		tracedPipeline := fluxus.NewTracedPipeline(
 			pipeline,
-			fluxus.WithTracerStageName[string, string]("benchmark-pipeline"),
-			fluxus.WithTracerProvider[string, string](noopProvider),
-			// "benchmark-pipeline",
+			fluxus.WithTracerPipelineName[string, string]("benchmark-pipeline"),
+			fluxus.WithTracerPipelineProvider[string, string](noopProvider),
 		)
-		// if traceable, ok := tracedPipeline.(*fluxus.TracedPipelineStage[string, string]); ok {
-		// 	traceable.WithTracerProvider(noopProvider)
-		// }
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			_, _ = tracedPipeline.Process(ctx, input)
