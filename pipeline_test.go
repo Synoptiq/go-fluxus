@@ -438,7 +438,7 @@ func TestStreamPipelineBasicFlow(t *testing.T) {
 	builderStage2 := fluxus.AddStage(builder, "int_to_string", &IntToStringStage{})
 	builderStage3 := fluxus.AddStage(builderStage2, "string_to_upper", &StringToUpperStage{})
 
-	pipeline, err := fluxus.Finalize[int, string](builderStage3)
+	pipeline, err := fluxus.Finalize[int](builderStage3)
 	require.NoError(t, err)
 	require.NotNil(t, pipeline)
 
@@ -549,7 +549,7 @@ func TestStreamPipelineMultipleStages(t *testing.T) {
 	b3 := fluxus.AddStage(b2, "split_chars", splitChars)
 	b4 := fluxus.AddStage(b3, "count_occurrences", countOccurrences)
 
-	pipeline, err := fluxus.Finalize[int, map[string]int](b4)
+	pipeline, err := fluxus.Finalize[int](b4)
 	require.NoError(t, err)
 	require.NotNil(t, pipeline)
 
@@ -660,7 +660,7 @@ func TestStreamPipelineErrorHandling(t *testing.T) {
 				fluxus.WithAdapterErrorStrategy[int, int](tc.strategy),
 			)
 
-			pipeline, err := fluxus.Finalize[int, int](b2)
+			pipeline, err := fluxus.Finalize[int](b2)
 			require.NoError(t, err)
 			require.NotNil(t, pipeline)
 
@@ -746,7 +746,7 @@ func TestStreamPipelineCancellation(t *testing.T) {
 	)
 	b2 := fluxus.AddStage(builder, "slow_stage", slowStage)
 
-	pipeline, err := fluxus.Finalize[int, int](b2)
+	pipeline, err := fluxus.Finalize[int](b2)
 	require.NoError(t, err)
 	require.NotNil(t, pipeline)
 
@@ -866,7 +866,7 @@ func TestStreamPipelineBufferSizes(t *testing.T) {
 			b2 := fluxus.AddStage(builder, "slow_producer", slowProducer)
 			b3 := fluxus.AddStage(b2, "slow_consumer", slowConsumer)
 
-			pipeline, err := fluxus.Finalize[int, int](b3)
+			pipeline, err := fluxus.Finalize[int](b3)
 			require.NoError(t, err)
 			require.NotNil(t, pipeline)
 
@@ -1168,7 +1168,7 @@ func TestStreamPipelineRobustness(t *testing.T) {
 				),
 			)
 			b2 := fluxus.AddStage(builder, "flaky_stage", flakyStage, adapterOpts...)
-			pipeline, err := fluxus.Finalize[int, int](b2)
+			pipeline, err := fluxus.Finalize[int](b2)
 			require.NoError(t, err)
 
 			// Run the pipeline
@@ -1428,7 +1428,7 @@ func BenchmarkStreamPipelineComplexity(b *testing.B) {
 				}
 
 				// Finalize the pipeline
-				pipeline, _ := fluxus.Finalize[int, int](currentBuilder)
+				pipeline, _ := fluxus.Finalize[int](currentBuilder)
 
 				const itemCount = 50
 				source := make(chan int, itemCount)
@@ -1553,7 +1553,7 @@ func benchmarkPipeline[T any](b *testing.B, name string, stage fluxus.Stage[T, T
 		// Build the pipeline
 		builder := fluxus.NewStreamPipeline[T]()
 		b2 := fluxus.AddStage(builder, name, stage)
-		pipeline, _ := fluxus.Finalize[T, T](b2)
+		pipeline, _ := fluxus.Finalize[T](b2)
 
 		source := make(chan T, itemCount)
 		sink := make(chan T, itemCount)
@@ -1626,7 +1626,7 @@ func BenchmarkStreamPipelineOverhead(b *testing.B) {
 					// Since all stages are int->int, we know the type.
 					currentBuilder = fluxus.AddStage(currentBuilder, "pass_stage", passStage)
 				}
-				pipeline, err := fluxus.Finalize[int, int](currentBuilder)
+				pipeline, err := fluxus.Finalize[int](currentBuilder)
 				if err != nil {
 					b.Fatalf("Failed to finalize pipeline: %v", err)
 				}
@@ -1747,7 +1747,7 @@ func (m *mockLifecycleStage) Process(ctx context.Context, input string) (string,
 func TestPipelineLifecycle(t *testing.T) {
 	ctx := context.Background()
 	mockStage := &mockLifecycleStage{}
-	pipeline := fluxus.NewPipeline[string, string](mockStage)
+	pipeline := fluxus.NewPipeline(mockStage)
 
 	// 1. Process before Start should fail
 	_, err := pipeline.Process(ctx, "input1")
@@ -1803,7 +1803,7 @@ func TestPipelineLifecycleErrors(t *testing.T) {
 
 	t.Run("StartError", func(t *testing.T) {
 		mockStage := &mockLifecycleStage{startErr: startErr}
-		pipeline := fluxus.NewPipeline[string, string](mockStage)
+		pipeline := fluxus.NewPipeline(mockStage)
 
 		err := pipeline.Start(ctx)
 		require.Error(t, err, "Start should fail")
@@ -1819,7 +1819,7 @@ func TestPipelineLifecycleErrors(t *testing.T) {
 
 	t.Run("StopError", func(t *testing.T) {
 		mockStage := &mockLifecycleStage{stopErr: stopErr}
-		pipeline := fluxus.NewPipeline[string, string](mockStage)
+		pipeline := fluxus.NewPipeline(mockStage)
 
 		// Start successfully
 		pipelineStartErr := pipeline.Start(ctx)
@@ -1847,7 +1847,7 @@ func TestStreamPipelineLifecycle(t *testing.T) {
 	mockStage := &mockLifecycleStage{} // Implements Starter and Stopper
 	builder := fluxus.NewStreamPipeline[string]()
 	b2 := fluxus.AddStage(builder, "mock_lifecycle", mockStage)
-	pipeline, err := fluxus.Finalize[string, string](b2)
+	pipeline, err := fluxus.Finalize[string](b2)
 	require.NoError(t, err)
 
 	source := make(chan string, 1)
@@ -1897,7 +1897,7 @@ func TestStreamPipelineStartStop(t *testing.T) {
 	mockStage := &mockLifecycleStage{processDelay: 50 * time.Millisecond}
 	builder := fluxus.NewStreamPipeline[string]()
 	b2 := fluxus.AddStage(builder, "mock_lifecycle", mockStage)
-	pipeline, err := fluxus.Finalize[string, string](b2)
+	pipeline, err := fluxus.Finalize[string](b2)
 	require.NoError(t, err)
 
 	source := make(chan string, 1)
@@ -1950,7 +1950,7 @@ func TestStreamPipelineLifecycleErrors(t *testing.T) {
 		mockStage := &mockLifecycleStage{startErr: startErr}
 		builder := fluxus.NewStreamPipeline[string]()
 		b2 := fluxus.AddStage(builder, "mock_lifecycle", mockStage)
-		pipeline, err := fluxus.Finalize[string, string](b2)
+		pipeline, err := fluxus.Finalize[string](b2)
 		require.NoError(t, err)
 
 		source := make(chan string)
@@ -1972,7 +1972,7 @@ func TestStreamPipelineLifecycleErrors(t *testing.T) {
 		mockStage := &mockLifecycleStage{stopErr: stopErr}
 		builder := fluxus.NewStreamPipeline[string]()
 		b2 := fluxus.AddStage(builder, "mock_lifecycle", mockStage)
-		pipeline, err := fluxus.Finalize[string, string](b2)
+		pipeline, err := fluxus.Finalize[string](b2)
 		require.NoError(t, err)
 
 		source := make(chan string, 1)
@@ -2011,7 +2011,7 @@ func TestStreamPipelineLifecycleErrors(t *testing.T) {
 
 		builder := fluxus.NewStreamPipeline[string]()
 		b2 := fluxus.AddStage(builder, "mock_lifecycle", mockStage)
-		pipeline, err := fluxus.Finalize[string, string](b2)
+		pipeline, err := fluxus.Finalize[string](b2)
 		require.NoError(t, err)
 
 		source := make(chan string, 1)
@@ -2050,7 +2050,7 @@ func TestStreamPipelineWaitBeforeStart(t *testing.T) {
 		"stage",
 		fluxus.StageFunc[string, string](func(_ context.Context, s string) (string, error) { return s, nil }),
 	)
-	pipeline, err := fluxus.Finalize[string, string](b2)
+	pipeline, err := fluxus.Finalize[string](b2)
 	require.NoError(t, err)
 
 	err = pipeline.Wait()
@@ -2065,7 +2065,7 @@ func TestStreamPipelineStopBeforeStart(t *testing.T) {
 		"stage",
 		fluxus.StageFunc[string, string](func(_ context.Context, s string) (string, error) { return s, nil }),
 	)
-	pipeline, err := fluxus.Finalize[string, string](b2)
+	pipeline, err := fluxus.Finalize[string](b2)
 	require.NoError(t, err)
 
 	err = pipeline.Stop(context.Background())
