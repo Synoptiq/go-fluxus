@@ -565,3 +565,4 @@ func (*noopMetricsCollector) StageWorkerConcurrency(_ context.Context, _ string,
 func (*noopMetricsCollector) StageWorkerItemProcessed(_ context.Context, _ string, _ time.Duration) {}
 func (*noopMetricsCollector) StageWorkerItemSkipped(_ context.Context, _ string, _ error)           {}
 func (*noopMetricsCollector) StageWorkerErrorSent(_ context.Context, _ string, _ error)             {}
+func (*noopMetricsCollector) WindowEmitted(_ context.Context, _ string, _ int)                      {}

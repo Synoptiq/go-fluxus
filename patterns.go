@@ -63,10 +63,8 @@ func (m *Map[I, O]) handleMapItemError(
 	wrappedErr := NewMapItemError(index, err) // Use the specific error type
 
 	if m.collectErrors {
-		// Need to check if errs is nil here too
-		if errs != nil {
-			errs[index] = wrappedErr
-		}
+		// errs is guaranteed to be non-nil if m.collectErrors is true
+		errs[index] = wrappedErr
 		// Store zero value for output on error when collecting
 		var zero O
 		results[index] = zero
@@ -737,4 +735,70 @@ func (mr *MapReduce[I, K, V, R]) reducePhase(ctx context.Context, grouped map[K]
 	}
 
 	return results, nil
+}
+
+// circularBuffer implements a basic fixed-size ring buffer.
+// It is NOT inherently thread-safe; synchronization must be handled externally.
+type circularBuffer[T any] struct {
+	items []T // The underlying slice holding the buffer data.
+	size  int // The maximum capacity of the buffer.
+	head  int // Index of the next slot to write to (end of the queue).
+	count int // Number of valid items currently in the buffer.
+}
+
+// newCircularBuffer creates a new circular buffer with the given fixed size.
+func newCircularBuffer[T any](size int) *circularBuffer[T] {
+	if size <= 0 {
+		// Or return an error, but panic aligns with window constructors
+		panic("circularBuffer size must be positive")
+	}
+	return &circularBuffer[T]{
+		items: make([]T, size),
+		size:  size,
+		head:  0,
+		count: 0,
+	}
+}
+
+// Add inserts an item into the buffer. If the buffer is full,
+// it overwrites the oldest item.
+func (cb *circularBuffer[T]) Add(item T) {
+	cb.items[cb.head] = item
+	cb.head = (cb.head + 1) % cb.size
+	if cb.count < cb.size {
+		cb.count++
+	}
+}
+
+// IsFull returns true if the buffer contains 'size' items.
+func (cb *circularBuffer[T]) IsFull() bool {
+	return cb.count == cb.size
+}
+
+// GetWindow returns a copy of the items currently in the buffer,
+// maintaining the logical order (oldest to newest).
+// It only returns a slice of length 'size' if the buffer IsFull().
+// Otherwise, it returns nil or an empty slice, aligning with the
+// SlidingCountWindow's behavior of only emitting full windows.
+func (cb *circularBuffer[T]) GetWindow() []T {
+	if !cb.IsFull() {
+		// Only return full windows, consistent with original SlidingCountWindow logic
+		return nil
+	}
+
+	window := make([]T, cb.size)
+	// Calculate the index of the oldest element (tail)
+	// tail = (head + size - count) % size
+	// Since we only copy when full (count == size), tail = head
+	tail := cb.head
+
+	// Copy elements in logical order
+	// Copy from tail to end of slice
+	copied := copy(window, cb.items[tail:])
+	// If needed, copy wrapped-around elements from start to tail
+	if copied < cb.size {
+		copy(window[copied:], cb.items[:tail])
+	}
+
+	return window
 }

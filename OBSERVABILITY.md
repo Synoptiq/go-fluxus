@@ -25,16 +25,17 @@ type MetricsCollector interface {
 
 	// RetryAttempt is called for each retry attempt within a Retry stage.
 	RetryAttempt(ctx context.Context, stageName string, attempt int, err error)
-	// BufferBatchProcessed is called when a batch is processed by a Buffer stage.
+	// BufferBatchProcessed is called when a batch is processed by a Buffer stage (if applicable).
+	// stageName is the name of the buffer stage.
 	BufferBatchProcessed(ctx context.Context, batchSize int, duration time.Duration)
 	// FanOutStarted is called when a FanOut stage begins processing.
-	FanOutStarted(ctx context.Context, stageName string, numBranches int) // Added stageName
+	FanOutStarted(ctx context.Context, stageName string, numBranches int)
 	// FanOutCompleted is called when a FanOut stage completes processing.
-	FanOutCompleted(ctx context.Context, stageName string, numBranches int, duration time.Duration) // Added stageName
+	FanOutCompleted(ctx context.Context, stageName string, numBranches int, duration time.Duration)
 	// FanInStarted is called when a FanIn stage begins processing.
-	FanInStarted(ctx context.Context, stageName string, numInputs int) // Added stageName
+	FanInStarted(ctx context.Context, stageName string, numInputs int)
 	// FanInCompleted is called when a FanIn stage completes processing.
-	FanInCompleted(ctx context.Context, stageName string, numInputs int, duration time.Duration) // Added stageName
+	FanInCompleted(ctx context.Context, stageName string, numInputs int, duration time.Duration)
 
 	// --- Stream Pipeline Lifecycle Metrics ---
 
@@ -43,18 +44,21 @@ type MetricsCollector interface {
 	PipelineStarted(ctx context.Context, pipelineName string) // Added
 	// PipelineCompleted is called when a StreamPipeline's Run method finishes.
 	// (Could optionally be called by simple Pipeline.Process too).
-	PipelineCompleted(ctx context.Context, pipelineName string, duration time.Duration, err error) // Added
+	PipelineCompleted(ctx context.Context, pipelineName string, duration time.Duration, err error)
 
 	// --- Stream Worker Metrics (Specific to how stages run within StreamPipeline) ---
 
 	// StageWorkerConcurrency reports the configured concurrency for a stage within the stream.
-	StageWorkerConcurrency(ctx context.Context, stageName string, concurrencyLevel int) // Added (Renamed from Adapter*)
+	StageWorkerConcurrency(ctx context.Context, stageName string, concurrencyLevel int)
 	// StageWorkerItemProcessed reports successful processing of an item by a stream worker.
-	StageWorkerItemProcessed(ctx context.Context, stageName string, duration time.Duration) // Added (Renamed from Adapter*)
-	// StageWorkerItemSkipped reports an item skipped due to an error with SkipOnError strategy.
-	StageWorkerItemSkipped(ctx context.Context, stageName string, err error) // Added (Renamed from Adapter*)
-	// StageWorkerErrorSent reports an error sent to an error channel via SendToErrorChannel strategy.
-	StageWorkerErrorSent(ctx context.Context, stageName string, err error) // Added (Renamed from Adapter*)
+	StageWorkerItemProcessed(ctx context.Context, stageName string, duration time.Duration)
+	// StageWorkerItemSkipped reports an item skipped due to an error with SkipOnError strategy within a stream worker.
+	StageWorkerItemSkipped(ctx context.Context, stageName string, err error)
+	// StageWorkerErrorSent reports an error sent to an error channel via SendToErrorChannel strategy from a stream worker.
+	StageWorkerErrorSent(ctx context.Context, stageName string, err error)
+
+    // --- Windowing Metrics ---
+    WindowEmitted(ctx context.Context, stageName string, itemCount int)
 }
 ```
 
@@ -237,29 +241,38 @@ tracedFanOut := fluxus.NewTracedFanOut(
 // Traced FanIn
 tracedFanIn := fluxus.NewTracedFanIn(
     fanIn,
-    "result-aggregation",
-    attribute.String("operation", "data-aggregation"),
+    fluxus.WithTracerStageName[Input, []Output]("result-aggregation")
+    fluxus.WithTracerAttributes[Input, []Output](
+        attribute.String("operation", "data-aggregation"),
+    )
 )
 
 // Traced Buffer
 tracedBuffer := fluxus.NewTracedBuffer(
     buffer,
-    "batch-processor",
-    attribute.String("operation", "batch-insert"),
+    fluxus.WithTracerStageName[Input, []Output]("batch-processor"),
+    fluxus.WithTracerAttributes[Input, []Output](
+        attribute.String("operation", "batch-insert"),
+    )
 )
 
 // Traced Retry
 tracedRetry := fluxus.NewTracedRetry(
     retry,
-    "resilient-operation",
-    attribute.String("operation", "api-call"),
+    fluxus.WithTracerStageName[Input, []Output]("resilient-operation"),
+    fluxus.WithTracerAttributes[Input, []Output](
+        attribute.String("operation", "api-call"),
+    )
 )
 
 // Traced Pipeline
 tracedPipeline := fluxus.NewTracedPipeline(
     pipeline,
-    "etl-pipeline",
-    attribute.String("data-source", "sales-db"),
+    fluxus.WithTracerPipelineName[Input, Output]("etl-pipeline"),
+    fluxus.WithTracerPipelineAttributes[Input, Output](
+        attribute.String("data-source", "sales-db"),
+    ),
+    // Optionally: fluxus.WithTracerPipelineProvider[Input, Output](customProvider),
 )
 ```
 
@@ -281,7 +294,7 @@ traced := fluxus.NewTracedStage(
     fluxus.WithTracerProvider[Input, Output](provider),
 )
 
-// Or with specialized tracers (New Example Style)
+// Or with specialized tracers, ensuring options are used consistently:
 tracedFanOut := fluxus.NewTracedFanOut(
     fanOut,
     fluxus.WithTracerStageName[Input, []Output]("parallel-processing"),

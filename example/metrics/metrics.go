@@ -35,6 +35,8 @@ type InMemoryMetricsCollector struct {
 	stageWorkerItemSkippedCount   int64 // Added
 	stageWorkerErrorSentCount     int64 // Added
 
+	windowEmittedCount int64 // Added
+
 	// Store durations (use mutex for slice access)
 	stageDurations map[string][]time.Duration
 	mu             sync.Mutex
@@ -123,6 +125,11 @@ func (m *InMemoryMetricsCollector) StageWorkerItemSkipped(ctx context.Context, s
 func (m *InMemoryMetricsCollector) StageWorkerErrorSent(ctx context.Context, stageName string, err error) {
 	atomic.AddInt64(&m.stageWorkerErrorSentCount, 1)
 	fmt.Printf("  📊 Metric: StageWorker[%s] error sent: %v\n", stageName, err)
+}
+
+func (m *InMemoryMetricsCollector) WindowEmitted(ctx context.Context, stageName string, itemCount int) {
+	atomic.AddInt64(&m.windowEmittedCount, 1)
+	fmt.Printf("  📊 Metric: Window[%s] emitted %d items\n", stageName, itemCount)
 }
 
 // PrintStats displays the collected metrics.

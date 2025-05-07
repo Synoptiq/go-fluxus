@@ -2,6 +2,7 @@ package fluxus
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -55,6 +56,12 @@ type MetricsCollector interface {
 	StageWorkerItemSkipped(ctx context.Context, stageName string, err error) // Added (Renamed from Adapter*)
 	// StageWorkerErrorSent reports an error sent to an error channel via SendToErrorChannel strategy.
 	StageWorkerErrorSent(ctx context.Context, stageName string, err error) // Added (Renamed from Adapter*)
+
+	// --- Windowing Stage Metrics ---
+
+	// WindowEmitted is called when a windowing stage successfully emits a window.
+	// stageName should ideally identify the specific window instance and its type.
+	WindowEmitted(ctx context.Context, stageName string, itemCountInWindow int)
 }
 
 // NoopMetricsCollector is a metrics collector that does nothing.
@@ -110,27 +117,24 @@ func (*NoopMetricsCollector) StageWorkerItemSkipped(_ context.Context, _ string,
 // StageWorkerErrorSent implements MetricsCollector interface for NoopMetricsCollector.
 func (*NoopMetricsCollector) StageWorkerErrorSent(_ context.Context, _ string, _ error) {}
 
+// WindowEmitted implements MetricsCollector interface for NoopMetricsCollector.
+func (*NoopMetricsCollector) WindowEmitted(_ context.Context, _ string, _ int) {}
+
 // DefaultMetricsCollector is the default metrics collector used when none is provided.
 var DefaultMetricsCollector MetricsCollector = &NoopMetricsCollector{}
 
-// MetricatedPipeline wraps a standard Pipeline with metrics collection.
-type MetricatedPipeline[I, O any] struct {
-	// The underlying pipeline
-	pipeline *Pipeline[I, O] // Embed or hold the original pipeline
-
-	// Name for metrics and logging
-	name string
-
-	// Metrics collector
+// pipelineMetricsConfig holds configuration for the pipeline metrics wrapper.
+type pipelineMetricsConfig[I, O any] struct {
+	name             string
 	metricsCollector MetricsCollector
 }
 
-// MetricatedPipelineOption is a function that configures a MetricatedPipeline.
-type MetricatedPipelineOption[I, O any] func(*MetricatedPipeline[I, O])
+// MetricatedPipelineOption is a function that configures the pipeline metrics wrapper.
+type MetricatedPipelineOption[I, O any] func(*pipelineMetricsConfig[I, O])
 
 // WithPipelineMetricsCollector adds a metrics collector to the metricated pipeline.
 func WithPipelineMetricsCollector[I, O any](collector MetricsCollector) MetricatedPipelineOption[I, O] {
-	return func(mp *MetricatedPipeline[I, O]) {
+	return func(mp *pipelineMetricsConfig[I, O]) {
 		if collector != nil {
 			mp.metricsCollector = collector
 		}
@@ -139,7 +143,7 @@ func WithPipelineMetricsCollector[I, O any](collector MetricsCollector) Metricat
 
 // WithPipelineName adds a name to the metricated pipeline for metrics and logging.
 func WithPipelineName[I, O any](name string) MetricatedPipelineOption[I, O] {
-	return func(mp *MetricatedPipeline[I, O]) {
+	return func(mp *pipelineMetricsConfig[I, O]) {
 		if name != "" {
 			mp.name = name
 		}
@@ -148,67 +152,54 @@ func WithPipelineName[I, O any](name string) MetricatedPipelineOption[I, O] {
 
 // NewMetricatedPipeline creates a new metricated pipeline that wraps an existing Pipeline.
 func NewMetricatedPipeline[I, O any](
-	pipeline *Pipeline[I, O],
+	pipelineToWrap *Pipeline[I, O], // Renamed for clarity
 	options ...MetricatedPipelineOption[I, O],
-) *MetricatedPipeline[I, O] {
-	if pipeline == nil {
-		panic("fluxus.NewMetricatedPipeline: pipeline cannot be nil")
+) Stage[I, O] { // Returns Stage[I,O]
+	if pipelineToWrap == nil {
+		panic("fluxus.NewMetricatedPipeline: pipelineToWrap cannot be nil")
 	}
 
-	mp := &MetricatedPipeline[I, O]{
-		pipeline:         pipeline,
-		name:             "metricated_pipeline",   // Default name
-		metricsCollector: DefaultMetricsCollector, // Default collector
+	cfg := &pipelineMetricsConfig[I, O]{
+		name:             "metricated_pipeline",
+		metricsCollector: DefaultMetricsCollector,
 	}
 
-	// Apply options
 	for _, option := range options {
-		option(mp)
+		option(cfg)
 	}
 
-	return mp
-}
+	// The returned StageFunc will be the metricated pipeline.
+	return StageFunc[I, O](func(ctx context.Context, input I) (O, error) {
+		startTime := time.Now()
+		var zero O
 
-// Process implements the core processing logic for the metricated pipeline,
-// adding metrics calls around the underlying pipeline's Process method.
-func (mp *MetricatedPipeline[I, O]) Process(ctx context.Context, input I) (O, error) {
-	// Track starting time for metrics
-	startTime := time.Now()
-	var zero O // Zero value for error returns
+		collector := cfg.metricsCollector // Use configured collector
+		pipelineName := cfg.name          // Use configured name
 
-	// Signal pipeline start
-	mp.metricsCollector.PipelineStarted(ctx, mp.name)
+		if collector != nil {
+			collector.PipelineStarted(ctx, pipelineName)
+		}
 
-	// Process the request using the underlying pipeline
-	output, err := mp.pipeline.Process(ctx, input)
+		output, err := pipelineToWrap.Process(ctx, input) // Call the original pipeline
 
-	// Record pipeline completion metrics
-	duration := time.Since(startTime)
-	mp.metricsCollector.PipelineCompleted(ctx, mp.name, duration, err)
+		if collector != nil {
+			duration := time.Since(startTime)
+			collector.PipelineCompleted(ctx, pipelineName, duration, err)
+		}
 
-	// Return the result from the underlying pipeline
-	// Note: The underlying pipeline already applied its error handler if configured.
-	if err != nil {
-		return zero, err // Return zero value for O on error
-	}
-	return output, nil
-}
-
-// WithErrorHandler delegates to the underlying pipeline's WithErrorHandler.
-// It returns the MetricatedPipeline for chaining.
-func (mp *MetricatedPipeline[I, O]) WithErrorHandler(handler func(error) error) *MetricatedPipeline[I, O] {
-	mp.pipeline.WithErrorHandler(handler) // Modify the underlying pipeline
-	return mp
+		if err != nil {
+			return zero, err
+		}
+		return output, nil
+	})
 }
 
 // MetricatedStage wraps any Stage with metrics collection
 type MetricatedStage[I, O any] struct {
 	// The underlying stage
 	stage Stage[I, O]
-
 	// Name for metrics and logging
 	name string
-
 	// Metrics collector
 	metricsCollector MetricsCollector
 }
@@ -278,11 +269,128 @@ func (ms *MetricatedStage[I, O]) Process(ctx context.Context, input I) (O, error
 	return output, err
 }
 
-// MetricatedFanOutStage wraps a FanOut with additional fan-out specific metrics
-type MetricatedFanOutStage[I, O any] struct {
-	stage            *FanOut[I, O]
+// MetricatedStreamStage wraps any StreamStage with metrics collection.
+type MetricatedStreamStage[T, O any] struct {
+	stage            StreamStage[T, O]
 	name             string
 	metricsCollector MetricsCollector
+	// Optional callback for emitted items
+	onEmit func(ctx context.Context, stageName string, emittedItem O)
+}
+
+// MetricatedStreamStageOption configures a MetricatedStreamStage.
+type MetricatedStreamStageOption[T, O any] func(*MetricatedStreamStage[T, O])
+
+// WithMetricsStreamStageName sets the name for the metricated stream stage.
+func WithMetricsStreamStageName[T, O any](name string) MetricatedStreamStageOption[T, O] {
+	return func(mss *MetricatedStreamStage[T, O]) {
+		if name != "" {
+			mss.name = name
+		}
+	}
+}
+
+// WithMetricsStreamCollector sets the MetricsCollector for the MetricatedStreamStage.
+func WithMetricsStreamCollector[T, O any](collector MetricsCollector) MetricatedStreamStageOption[T, O] {
+	return func(mss *MetricatedStreamStage[T, O]) {
+		if collector != nil {
+			mss.metricsCollector = collector
+		}
+	}
+}
+
+// WithStreamEmitCallback sets a callback to be invoked for each item emitted by the stream stage.
+func WithStreamEmitCallback[T, O any](
+	onEmit func(ctx context.Context, stageName string, emittedItem O),
+) MetricatedStreamStageOption[T, O] {
+	return func(mss *MetricatedStreamStage[T, O]) {
+		mss.onEmit = onEmit
+	}
+}
+
+// NewMetricatedStreamStage creates a new MetricatedStreamStage that wraps the given stream stage.
+func NewMetricatedStreamStage[T, O any](
+	stage StreamStage[T, O],
+	options ...MetricatedStreamStageOption[T, O],
+) StreamStage[T, O] { // Return StreamStage interface
+	if stage == nil {
+		panic("fluxus.NewMetricatedStreamStage: stage cannot be nil")
+	}
+
+	mss := &MetricatedStreamStage[T, O]{
+		stage:            stage,
+		name:             "metricated_stream_stage", // Default name
+		metricsCollector: DefaultMetricsCollector,
+	}
+	for _, option := range options {
+		option(mss)
+	}
+	return mss
+}
+
+// ProcessStream implements the StreamStage interface, adding metrics.
+func (mss *MetricatedStreamStage[T, O]) ProcessStream(ctx context.Context, in <-chan T, out chan<- O) error {
+	startTime := time.Now()
+	collector := mss.metricsCollector
+	stageName := mss.name
+
+	if collector != nil {
+		collector.StageStarted(ctx, stageName)
+	}
+
+	var err error
+	if mss.onEmit == nil {
+		// Original behavior: directly call the underlying stage
+		err = mss.stage.ProcessStream(ctx, in, out)
+	} else {
+		// Wrap the output channel to call onEmit for each item
+		internalOut := make(chan O) // O is the type of item in the output channel (e.g., []T for windows)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		var processingErr error
+
+		go func() {
+			defer wg.Done()
+			defer close(internalOut)
+			processingErr = mss.stage.ProcessStream(ctx, in, internalOut)
+		}()
+
+		done := false
+		for !done {
+			select {
+			case <-ctx.Done():
+				err = ctx.Err() // Prioritize context error
+				done = true
+			case item, ok := <-internalOut:
+				if !ok {
+					err = processingErr // Get error from the underlying stage processing
+					done = true
+					continue
+				}
+				mss.onEmit(ctx, stageName, item) // Call the emit callback
+				select {
+				case out <- item:
+				case <-ctx.Done():
+					err = ctx.Err()
+					done = true
+				}
+			}
+		}
+		wg.Wait()                               // Wait for the processing goroutine to finish
+		if err == nil && processingErr != nil { // If no context error but processing had an error
+			err = processingErr
+		}
+	}
+
+	if collector != nil {
+		if err != nil {
+			collector.StageError(ctx, stageName, err)
+		} else {
+			collector.StageCompleted(ctx, stageName, time.Since(startTime))
+		}
+	}
+
+	return err
 }
 
 // NewMetricatedFanOut creates a metricated wrapper around a FanOut stage.
@@ -294,59 +402,33 @@ func NewMetricatedFanOut[I, O any](
 		panic("fluxus.NewMetricatedFanOut: fanOut cannot be nil")
 	}
 
-	// Create a proxy for handling options
-	ms := &MetricatedStage[I, []O]{
-		stage:            fanOut,
+	configHolder := &MetricatedStage[I, []O]{
 		name:             "metricated_fan_out",
 		metricsCollector: DefaultMetricsCollector,
 	}
 
-	// Apply options
 	for _, option := range options {
-		option(ms)
+		option(configHolder)
 	}
 
-	// Create the specialized stage
-	return &MetricatedFanOutStage[I, O]{
-		stage:            fanOut,
-		name:             ms.name,
-		metricsCollector: ms.metricsCollector,
-	}
-}
+	collector := configHolder.metricsCollector
+	metricName := configHolder.name
 
-// Process implements the Stage interface for MetricatedFanOutStage
-func (ms *MetricatedFanOutStage[I, O]) Process(ctx context.Context, input I) ([]O, error) {
-	// Track starting time for metrics
-	startTime := time.Now()
-
-	// Signal stage start
-	if ms.metricsCollector != nil {
-		ms.metricsCollector.StageStarted(ctx, ms.name)
-		ms.metricsCollector.FanOutStarted(ctx, ms.name, len(ms.stage.stages))
-	}
-
-	// Process the request using the underlying stage
-	output, err := ms.stage.Process(ctx, input)
-
-	// Record metrics based on the result
-	if ms.metricsCollector != nil {
-		if err != nil {
-			ms.metricsCollector.StageError(ctx, ms.name, err)
-		} else {
-			duration := time.Since(startTime)
-			ms.metricsCollector.StageCompleted(ctx, ms.name, duration)
-			ms.metricsCollector.FanOutCompleted(ctx, ms.name, len(ms.stage.stages), duration)
+	intermediateStage := StageFunc[I, []O](func(ctx context.Context, input I) ([]O, error) {
+		fanOutStartTime := time.Now()
+		if collector != nil {
+			collector.FanOutStarted(ctx, metricName, len(fanOut.stages))
 		}
-	}
 
-	return output, err
-}
+		outputs, err := fanOut.Process(ctx, input)
 
-// MetricatedFanInStage wraps a FanIn with additional fan-in specific metrics
-type MetricatedFanInStage[I, O any] struct {
-	stage            *FanIn[I, O]
-	name             string
-	metricsCollector MetricsCollector
+		if collector != nil && err == nil {
+			collector.FanOutCompleted(ctx, metricName, len(fanOut.stages), time.Since(fanOutStartTime))
+		}
+		return outputs, err
+	})
+
+	return NewMetricatedStage(intermediateStage, options...)
 }
 
 // NewMetricatedFanIn creates a metricated wrapper around a FanIn stage.
@@ -358,59 +440,33 @@ func NewMetricatedFanIn[I, O any](
 		panic("fluxus.NewMetricatedFanIn: fanIn cannot be nil")
 	}
 
-	// Create a proxy for handling options
-	ms := &MetricatedStage[[]I, O]{
-		stage:            fanIn,
+	configHolder := &MetricatedStage[[]I, O]{
 		name:             "metricated_fan_in",
 		metricsCollector: DefaultMetricsCollector,
 	}
 
-	// Apply options
 	for _, option := range options {
-		option(ms)
+		option(configHolder)
 	}
 
-	// Create the specialized stage
-	return &MetricatedFanInStage[I, O]{
-		stage:            fanIn,
-		name:             ms.name,
-		metricsCollector: ms.metricsCollector,
-	}
-}
+	collector := configHolder.metricsCollector
+	metricName := configHolder.name
 
-// Process implements the Stage interface for MetricatedFanInStage
-func (ms *MetricatedFanInStage[I, O]) Process(ctx context.Context, inputs []I) (O, error) {
-	// Track starting time for metrics
-	startTime := time.Now()
-
-	// Signal stage start
-	if ms.metricsCollector != nil {
-		ms.metricsCollector.StageStarted(ctx, ms.name)
-		ms.metricsCollector.FanInStarted(ctx, ms.name, len(inputs))
-	}
-
-	// Process the request using the underlying stage
-	output, err := ms.stage.Process(ctx, inputs)
-
-	// Record metrics based on the result
-	if ms.metricsCollector != nil {
-		if err != nil {
-			ms.metricsCollector.StageError(ctx, ms.name, err)
-		} else {
-			duration := time.Since(startTime)
-			ms.metricsCollector.StageCompleted(ctx, ms.name, duration)
-			ms.metricsCollector.FanInCompleted(ctx, ms.name, len(inputs), duration)
+	intermediateStage := StageFunc[[]I, O](func(ctx context.Context, inputs []I) (O, error) {
+		fanInStartTime := time.Now()
+		if collector != nil {
+			collector.FanInStarted(ctx, metricName, len(inputs))
 		}
-	}
 
-	return output, err
-}
+		output, err := fanIn.Process(ctx, inputs)
 
-// MetricatedBufferStage wraps a Buffer with buffer-specific metrics
-type MetricatedBufferStage[I, O any] struct {
-	stage            *Buffer[I, O]
-	name             string
-	metricsCollector MetricsCollector
+		if collector != nil && err == nil {
+			collector.FanInCompleted(ctx, metricName, len(inputs), time.Since(fanInStartTime))
+		}
+		return output, err
+	})
+
+	return NewMetricatedStage(intermediateStage, options...)
 }
 
 // NewMetricatedBuffer creates a metricated wrapper around a Buffer stage.
@@ -422,57 +478,29 @@ func NewMetricatedBuffer[I, O any](
 		panic("fluxus.NewMetricatedBuffer: buffer cannot be nil")
 	}
 
-	// Create a proxy for handling options
-	ms := &MetricatedStage[[]I, []O]{
-		stage:            buffer,
+	// Buffer stage calls BufferBatchProcessed internally.
+	// So, NewMetricatedBuffer can directly use NewMetricatedStage to wrap the buffer.
+	// The options will configure the name and collector for the generic MetricatedStage.
+	// The default name can be set here if not provided by options.
+
+	// Apply options to a temporary config holder to get the final name and collector.
+	configHolder := &MetricatedStage[[]I, []O]{
 		name:             "metricated_buffer",
 		metricsCollector: DefaultMetricsCollector,
 	}
 
-	// Apply options
 	for _, option := range options {
-		option(ms)
+		option(configHolder)
 	}
 
-	// Create the specialized stage
-	return &MetricatedBufferStage[I, O]{
-		stage:            buffer,
-		name:             ms.name,
-		metricsCollector: ms.metricsCollector,
+	// Construct the final options to pass to NewMetricatedStage
+	finalOptions := []MetricatedStageOption[[]I, []O]{
+		WithMetricsStageName[[]I, []O](configHolder.name),
+		WithMetricsCollector[[]I, []O](configHolder.metricsCollector),
 	}
-}
+	// Add any other options the user might have passed that are generic.
 
-// Process implements the Stage interface for MetricatedBufferStage
-func (ms *MetricatedBufferStage[I, O]) Process(ctx context.Context, inputs []I) ([]O, error) {
-	// Track starting time for metrics
-	startTime := time.Now()
-
-	// Signal stage start
-	if ms.metricsCollector != nil {
-		ms.metricsCollector.StageStarted(ctx, ms.name)
-	}
-
-	// Process the request using the underlying buffer stage
-	// Note: The Buffer will call BufferBatchProcessed internally for each batch
-	output, err := ms.stage.Process(ctx, inputs)
-
-	// Record metrics based on the result
-	if ms.metricsCollector != nil {
-		if err != nil {
-			ms.metricsCollector.StageError(ctx, ms.name, err)
-		} else {
-			ms.metricsCollector.StageCompleted(ctx, ms.name, time.Since(startTime))
-		}
-	}
-
-	return output, err
-}
-
-// MetricatedRetryStage wraps a Retry with additional retry-specific metrics
-type MetricatedRetryStage[I, O any] struct {
-	stage            *Retry[I, O]
-	name             string
-	metricsCollector MetricsCollector
+	return NewMetricatedStage(buffer, finalOptions...)
 }
 
 // NewMetricatedRetry creates a metricated wrapper around a Retry stage.
@@ -484,73 +512,215 @@ func NewMetricatedRetry[I, O any](
 		panic("fluxus.NewMetricatedRetry: retry cannot be nil")
 	}
 
-	// Create a proxy for handling options
-	ms := &MetricatedStage[I, O]{
-		stage:            retry,
+	configHolder := &MetricatedStage[I, O]{
 		name:             "metricated_retry",
 		metricsCollector: DefaultMetricsCollector,
 	}
 
-	// Apply options
 	for _, option := range options {
-		option(ms)
+		option(configHolder)
 	}
+	collector := configHolder.metricsCollector
+	metricName := configHolder.name
 
-	// Create the specialized stage
-	return &MetricatedRetryStage[I, O]{
-		stage:            retry,
-		name:             ms.name,
-		metricsCollector: ms.metricsCollector,
-	}
+	// Return a StageFunc that implements the retry metrics logic
+	return StageFunc[I, O](func(ctx context.Context, input I) (O, error) {
+		startTime := time.Now()
+		if collector != nil {
+			collector.StageStarted(ctx, metricName)
+		}
+
+		attemptCount := 0
+		originalInternalStage := retry.stage // The stage *inside* the Retry struct
+
+		// Wrapper for the internal stage to count and report attempts
+		metricatedInternalAttemptStage := StageFunc[I, O](func(attemptCtx context.Context, attemptInput I) (O, error) {
+			attemptCount++
+			// Call Process on originalInternalStage first to get the error for RetryAttempt
+			output, err := originalInternalStage.Process(attemptCtx, attemptInput)
+			if collector != nil {
+				collector.RetryAttempt(ctx, metricName, attemptCount, err) // Pass the error from the attempt
+			}
+			return output, err
+		})
+
+		// Temporarily replace the Retry stage's internal stage
+		retry.stage = metricatedInternalAttemptStage
+
+		output, err := retry.Process(ctx, input) // Call the original Retry stage's Process method
+
+		// Restore the original internal stage
+		retry.stage = originalInternalStage
+
+		if collector != nil {
+			if err != nil {
+				collector.StageError(ctx, metricName, err)
+			} else {
+				collector.StageCompleted(ctx, metricName, time.Since(startTime))
+			}
+		}
+		return output, err
+	})
 }
 
-// Process implements the Stage interface for MetricatedRetryStage
-func (ms *MetricatedRetryStage[I, O]) Process(ctx context.Context, input I) (O, error) {
-	// Track starting time for metrics
-	startTime := time.Now()
-
-	// Signal stage start
-	if ms.metricsCollector != nil {
-		ms.metricsCollector.StageStarted(ctx, ms.name)
+// NewMetricatedMap creates a metricated wrapper around a Map stage.
+func NewMetricatedMap[I, O any](
+	mapStage *Map[I, O],
+	options ...MetricatedStageOption[[]I, []O], // Map's Process takes []I and returns []O
+) Stage[[]I, []O] {
+	if mapStage == nil {
+		panic("fluxus.NewMetricatedMap: mapStage cannot be nil")
+	}
+	// Map stage doesn't have specific metrics in MetricsCollector beyond generic StageStarted/Completed/Error.
+	// So, we directly wrap it with NewMetricatedStage.
+	// Options provided to NewMetricatedMap will be passed to NewMetricatedStage.
+	// A default name can be set if not overridden by options.
+	defaultOptions := []MetricatedStageOption[[]I, []O]{
+		WithMetricsStageName[[]I, []O]("metricated_map"),
 	}
 
-	// Create a counter for tracking attempts
-	attemptCount := 0
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(defaultOptions, options...)
+	return NewMetricatedStage(mapStage, allOptions...)
+}
 
-	// Temporarily replace the original stage with our counted version
-	originalStage := ms.stage.stage
+// NewMetricatedMapReduce creates a metricated wrapper around a MapReduce stage.
+func NewMetricatedMapReduce[I any, K comparable, V any, R any](
+	mapReduceStage *MapReduce[I, K, V, R],
+	options ...MetricatedStageOption[[]I, []R], // MapReduce's Process takes []I and returns []R
+) Stage[[]I, []R] {
+	if mapReduceStage == nil {
+		panic("fluxus.NewMetricatedMapReduce: mapReduceStage cannot be nil")
+	}
+	// Similar to Map, MapReduce doesn't have specific metrics in MetricsCollector.
+	defaultOptions := []MetricatedStageOption[[]I, []R]{
+		WithMetricsStageName[[]I, []R]("metricated_map_reduce"),
+	}
 
-	// Create a wrapper stage that counts attempts
-	countingStage := StageFunc[I, O](func(ctx context.Context, input I) (O, error) {
-		// Increment attempt counter before each attempt
-		attemptCount++
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(defaultOptions, options...)
+	return NewMetricatedStage(mapReduceStage, allOptions...)
+}
 
-		// Record the attempt
-		if ms.metricsCollector != nil {
-			ms.metricsCollector.RetryAttempt(ctx, ms.name, attemptCount, nil)
-		}
+// NewMetricatedTumblingCountWindow creates a metricated wrapper for TumblingCountWindow.
+func NewMetricatedTumblingCountWindow[T any](
+	windowStage *TumblingCountWindow[T],
+	options ...MetricatedStreamStageOption[T, []T],
+) StreamStage[T, []T] {
+	if windowStage == nil {
+		panic("fluxus.NewMetricatedTumblingCountWindow: windowStage cannot be nil")
+	}
+	// Determine the collector that will be used by MetricatedStreamStage
+	tempCfg := &MetricatedStreamStage[T, []T]{metricsCollector: DefaultMetricsCollector}
 
-		// Forward to the original stage
-		return originalStage.Process(ctx, input)
-	})
+	for _, opt := range options { // Apply user-provided options first to see if collector is overridden
+		opt(tempCfg)
+	}
 
-	// Temporarily replace the stage with our counting version
-	ms.stage.stage = countingStage
+	finalCollector := tempCfg.metricsCollector
 
-	// Process using the modified retry stage
-	output, err := ms.stage.Process(ctx, input)
-
-	// Restore the original stage
-	ms.stage.stage = originalStage
-
-	// Record metrics based on the result
-	if ms.metricsCollector != nil {
-		if err != nil {
-			ms.metricsCollector.StageError(ctx, ms.name, err)
-		} else {
-			ms.metricsCollector.StageCompleted(ctx, ms.name, time.Since(startTime))
+	emitCallback := func(ctx context.Context, stageName string, emittedWindow []T) {
+		if finalCollector != nil {
+			finalCollector.WindowEmitted(ctx, stageName, len(emittedWindow))
 		}
 	}
 
-	return output, err
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(
+		options, // Pass original options through
+		WithMetricsStreamStageName[T, []T](
+			"metricated_tumbling_count_window",
+		), // Default name, can be overridden by user options
+		WithStreamEmitCallback[T](emitCallback),
+	)
+
+	return NewMetricatedStreamStage(windowStage, allOptions...)
+}
+
+// NewMetricatedTumblingTimeWindow creates a metricated wrapper for TumblingTimeWindow.
+func NewMetricatedTumblingTimeWindow[T any](
+	windowStage *TumblingTimeWindow[T],
+	options ...MetricatedStreamStageOption[T, []T],
+) StreamStage[T, []T] {
+	// Similar logic to NewMetricatedTumblingCountWindow for emitCallback
+	tempCfg := &MetricatedStreamStage[T, []T]{metricsCollector: DefaultMetricsCollector}
+
+	for _, opt := range options {
+		opt(tempCfg)
+	}
+
+	finalCollector := tempCfg.metricsCollector
+
+	emitCallback := func(ctx context.Context, stageName string, emittedWindow []T) {
+		if finalCollector != nil {
+			finalCollector.WindowEmitted(ctx, stageName, len(emittedWindow))
+		}
+	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(
+		options,
+		WithMetricsStreamStageName[T, []T]("metricated_tumbling_time_window"),
+		WithStreamEmitCallback[T](emitCallback),
+	)
+
+	return NewMetricatedStreamStage(windowStage, allOptions...)
+}
+
+// NewMetricatedSlidingCountWindow creates a metricated wrapper for SlidingCountWindow.
+func NewMetricatedSlidingCountWindow[T any](
+	windowStage *SlidingCountWindow[T],
+	options ...MetricatedStreamStageOption[T, []T],
+) StreamStage[T, []T] {
+	tempCfg := &MetricatedStreamStage[T, []T]{metricsCollector: DefaultMetricsCollector}
+
+	for _, opt := range options {
+		opt(tempCfg)
+	}
+
+	finalCollector := tempCfg.metricsCollector
+
+	emitCallback := func(ctx context.Context, stageName string, emittedWindow []T) {
+		if finalCollector != nil {
+			finalCollector.WindowEmitted(ctx, stageName, len(emittedWindow))
+		}
+	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(
+		options,
+		WithMetricsStreamStageName[T, []T]("metricated_sliding_count_window"),
+		WithStreamEmitCallback[T](emitCallback),
+	)
+
+	return NewMetricatedStreamStage(windowStage, allOptions...)
+}
+
+// NewMetricatedSlidingTimeWindow creates a metricated wrapper for SlidingTimeWindow.
+func NewMetricatedSlidingTimeWindow[T any](
+	windowStage *SlidingTimeWindow[T],
+	options ...MetricatedStreamStageOption[T, []T],
+) StreamStage[T, []T] {
+	tempCfg := &MetricatedStreamStage[T, []T]{metricsCollector: DefaultMetricsCollector}
+
+	for _, opt := range options {
+		opt(tempCfg)
+	}
+
+	finalCollector := tempCfg.metricsCollector
+
+	emitCallback := func(ctx context.Context, stageName string, emittedWindow []T) {
+		if finalCollector != nil {
+			finalCollector.WindowEmitted(ctx, stageName, len(emittedWindow))
+		}
+	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(
+		options,
+		WithMetricsStreamStageName[T, []T]("metricated_sliding_time_window"),
+		WithStreamEmitCallback[T](emitCallback),
+	)
+
+	return NewMetricatedStreamStage(windowStage, allOptions...)
 }

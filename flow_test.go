@@ -553,7 +553,7 @@ func TestRouterNilSelector(t *testing.T) {
 	routes := []fluxus.Route[string, string]{
 		{Name: "A", Stage: makeSimpleStage("A", 0, false)},
 	}
-	router := fluxus.NewRouter[string, string](nil, routes...) // Pass nil selector
+	router := fluxus.NewRouter(nil, routes...) // Pass nil selector
 
 	_, err := router.Process(context.Background(), "input")
 	require.Error(t, err)
@@ -703,17 +703,14 @@ func TestJoinByKeyEmptyInput(t *testing.T) {
 
 // TestJoinByKeyNilKeyFunc tests the error handling when keyFunc is nil.
 func TestJoinByKeyNilKeyFunc(t *testing.T) {
-	// Explicitly create with nil keyFunc
-	joinStage := fluxus.NewJoinByKey[joinItem, string](nil)
-
-	inputs := []joinItem{{ID: 1, Group: "A", Value: "apple"}}
-
-	expectedErr := errors.New("JoinByKey: keyFunc cannot be nil")
-
-	_, err := joinStage.Process(context.Background(), inputs)
-
-	// Use require.ErrorContains because the exact error instance isn't exported
-	require.ErrorContains(t, err, expectedErr.Error())
+	// Test that NewJoinByKey panics if keyFunc is nil
+	require.PanicsWithValue(t,
+		"fluxus.NewJoinByKey: keyFunc cannot be nil",
+		func() {
+			_ = fluxus.NewJoinByKey[joinItem, string](nil)
+		},
+		"NewJoinByKey should panic when keyFunc is nil",
+	)
 }
 
 // TestJoinByKeyFuncError tests when the key function returns an error.

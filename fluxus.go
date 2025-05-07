@@ -544,7 +544,7 @@ func (a *StreamAdapter[I, O]) processSequential(ctx context.Context, in <-chan I
 				// ---
 
 				// Handle error based on strategy
-				_, processErr := a.handleItemError(ctx, item, err)
+				processErr := a.handleItemError(ctx, item, err)
 				itemSpan.End() // End the span after processing the item
 				if processErr != nil {
 					// StopOnError strategy returned an error
@@ -659,7 +659,7 @@ func (a *StreamAdapter[I, O]) runWorker(gctx context.Context, jobs <-chan I, out
 			// ---
 
 			// Handle error based on strategy
-			_, processErr := a.handleItemError(gctx, item, err)
+			processErr := a.handleItemError(gctx, item, err)
 			itemSpan.End()
 			if processErr != nil {
 				// StopOnError strategy: return the error to errgroup
@@ -693,21 +693,15 @@ func (a *StreamAdapter[I, O]) runWorker(gctx context.Context, jobs <-chan I, out
 	return nil // Worker finished normally after jobs channel closed
 }
 
-// handleItemError centralizes the logic for dealing with errors from wrappedStage.Process,
-// including logging, metrics reporting, and applying the configured ErrorHandlingStrategy.
-// It returns (true, nil) if processing should continue, (false, err) if StopOnError is triggered.
-// The returned error for StopOnError is wrapped with adapter context.
-func (a *StreamAdapter[I, O]) handleItemError(ctx context.Context, item I, err error) (bool, error) {
+// handleItemError centralizes the logic for dealing with errors from wrappedStage.Process.
+// It returns whether processing should continue for the current item (relevant for concurrent)
+// and any fatal error (only for StopOnError strategy).
+func (a *StreamAdapter[I, O]) handleItemError(ctx context.Context, item I, err error) error {
 	switch a.errStrategy {
 	case StopOnError:
 		// Log and return the error to stop the stage/pipeline
-		wrappedErr := fmt.Errorf("adapter '%s' failed with StopOnError strategy: %w", a.adapterName, err)
-		a.logf(
-			"ERROR: fluxus.StreamAdapter '%s' stopping due to error: %v",
-			a.adapterName,
-			err,
-		) // Log original error for clarity
-		return false, wrappedErr // Signal to stop and return the error
+		a.logf("ERROR: fluxus.StreamAdapter stopping due to error: %v", err)
+		return err // Signal to stop and return the error
 	case SendToErrorChannel:
 		// Send the item and error to the configured error channel
 		processingErr := ProcessingError[I]{Item: item, Error: err}
@@ -724,7 +718,7 @@ func (a *StreamAdapter[I, O]) handleItemError(ctx context.Context, item I, err e
 			// Depending on requirements, you might want to return ctx.Err() here
 			// but typically SendToErrorChannel implies continuing if possible.
 		}
-		return true, nil // Signal to continue processing next item
+		return nil // Signal to continue processing next item
 
 	case SkipOnError:
 		fallthrough // Fallthrough to default skip behavior
@@ -734,7 +728,7 @@ func (a *StreamAdapter[I, O]) handleItemError(ctx context.Context, item I, err e
 		// --- End Metrics ---
 		// Log and continue to the next item
 		a.logf("WARN: fluxus.StreamAdapter skipping item due to error: %v", err)
-		return true, nil // Signal to continue processing next item
+		return nil // Signal to continue processing next item
 	}
 }
 

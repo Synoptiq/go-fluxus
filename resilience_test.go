@@ -544,7 +544,7 @@ func BenchmarkCircuitBreakerConcurrency(b *testing.B) {
 // without any retries if the underlying stage succeeds on the first attempt.
 func TestRetrySuccessFirstTry(t *testing.T) {
 	mockStage := newRetryMockStage(1, nil, 0) // Succeeds on first attempt
-	retryStage := fluxus.NewRetry[string, string](mockStage, 3)
+	retryStage := fluxus.NewRetry(mockStage, 3)
 	ctx := context.Background()
 
 	result, err := retryStage.Process(ctx, "input-1")
@@ -558,7 +558,7 @@ func TestRetrySuccessFirstTry(t *testing.T) {
 func TestRetrySuccessAfterRetries(t *testing.T) {
 	attemptsNeeded := 3
 	mockStage := newRetryMockStage(attemptsNeeded, errors.New("transient error"), 0)
-	retryStage := fluxus.NewRetry[string, string](mockStage, 5) // Allow up to 5 attempts
+	retryStage := fluxus.NewRetry(mockStage, 5) // Allow up to 5 attempts
 	ctx := context.Background()
 
 	result, err := retryStage.Process(ctx, "input-retry")
@@ -572,7 +572,7 @@ func TestRetrySuccessAfterRetries(t *testing.T) {
 func TestRetryFailureMaxAttempts(t *testing.T) {
 	maxAttempts := 3
 	mockStage := newRetryMockStage(0, errors.New("persistent error"), 0) // Always fails
-	retryStage := fluxus.NewRetry[string, string](mockStage, maxAttempts)
+	retryStage := fluxus.NewRetry(mockStage, maxAttempts)
 	ctx := context.Background()
 
 	_, err := retryStage.Process(ctx, "input-fail")
@@ -598,7 +598,7 @@ func TestRetryShouldRetryPredicate(t *testing.T) {
 		return "", permanentErr // Fail with permanent error on second attempt
 	})
 
-	retryStage := fluxus.NewRetry[string, string](mockStage, 3).
+	retryStage := fluxus.NewRetry(mockStage, 3).
 		WithShouldRetry(func(err error) bool {
 			return errors.Is(err, transientErr) // Only retry transient errors
 		})
@@ -620,7 +620,7 @@ func TestRetryBackoff(t *testing.T) {
 	backoffDelay := 20 * time.Millisecond
 	mockStage := newRetryMockStage(attemptsNeeded, errors.New("backoff error"), 0)
 
-	retryStage := fluxus.NewRetry[string, string](mockStage, 5).
+	retryStage := fluxus.NewRetry(mockStage, 5).
 		WithBackoff(func(attempt int) int {
 			// Exponential backoff (simple version)
 			return int(backoffDelay.Milliseconds()) * (attempt + 1) // attempt is 0-based
@@ -653,7 +653,7 @@ func TestRetryContextCancellationDuringBackoff(t *testing.T) {
 	cancelTime := 30 * time.Millisecond
 	backoffFunc := func(_ int) int { return 50 }                         // 50ms backoff
 	mockStage := newRetryMockStage(0, errors.New("persistent error"), 0) // Always fails
-	retryStage := fluxus.NewRetry[string, string](mockStage, 3).WithBackoff(backoffFunc)
+	retryStage := fluxus.NewRetry(mockStage, 3).WithBackoff(backoffFunc)
 
 	ctx, cancel := context.WithTimeout(context.Background(), cancelTime)
 	defer cancel()
@@ -677,7 +677,7 @@ func TestRetryContextCancellationDuringBackoff(t *testing.T) {
 // cancellation that occurs even before the first attempt is made.
 func TestRetryContextCancellationBeforeFirstAttempt(t *testing.T) {
 	mockStage := newRetryMockStage(1, nil, 0) // Would succeed if called
-	retryStage := fluxus.NewRetry[string, string](mockStage, 3)
+	retryStage := fluxus.NewRetry(mockStage, 3)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
@@ -697,7 +697,7 @@ func TestRetryContextCancellationDuringProcessing(t *testing.T) {
 	processingDelay := 100 * time.Millisecond
 	cancelTime := 50 * time.Millisecond
 	mockStage := newRetryMockStage(0, errors.New("some error"), processingDelay) // Always fails, takes time
-	retryStage := fluxus.NewRetry[string, string](mockStage, 3)
+	retryStage := fluxus.NewRetry(mockStage, 3)
 
 	ctx, cancel := context.WithTimeout(context.Background(), cancelTime)
 	defer cancel()
@@ -719,7 +719,7 @@ func TestRetryErrorHandler(t *testing.T) {
 	mockStage := newRetryMockStage(0, originalErr, 0) // Always fails
 	customErr := errors.New("custom wrapped error")
 
-	retryStage := fluxus.NewRetry[string, string](mockStage, maxAttempts).
+	retryStage := fluxus.NewRetry(mockStage, maxAttempts).
 		WithErrorHandler(func(err error) error {
 			return fmt.Errorf("%w: %w", customErr, err) // Wrap with custom error
 		})
@@ -737,7 +737,7 @@ func TestRetryErrorHandler(t *testing.T) {
 // It should fail immediately without calling the underlying stage.
 func TestRetryZeroAttempts(t *testing.T) {
 	mockStage := newRetryMockStage(1, nil, 0) // Would succeed if called
-	retryStage := fluxus.NewRetry[string, string](mockStage, 0)
+	retryStage := fluxus.NewRetry(mockStage, 0)
 	ctx := context.Background()
 
 	_, err := retryStage.Process(ctx, "input-zero")
@@ -756,7 +756,7 @@ func TestRetryOneAttempt(t *testing.T) {
 	// TestRetryOneAttemptSucceeds tests the case where the single attempt succeeds.
 	t.Run("Succeeds", func(t *testing.T) {
 		mockStage := newRetryMockStage(1, nil, 0) // Succeeds on first try
-		retryStage := fluxus.NewRetry[string, string](mockStage, 1)
+		retryStage := fluxus.NewRetry(mockStage, 1)
 		ctx := context.Background()
 		result, err := retryStage.Process(ctx, "input-one-succeed")
 		require.NoError(t, err)
@@ -767,7 +767,7 @@ func TestRetryOneAttempt(t *testing.T) {
 	t.Run("Fails", func(t *testing.T) {
 		failErr := errors.New("fail one")
 		mockStage := newRetryMockStage(0, failErr, 0) // Always fails
-		retryStage := fluxus.NewRetry[string, string](mockStage, 1)
+		retryStage := fluxus.NewRetry(mockStage, 1)
 		ctx := context.Background()
 		_, err := retryStage.Process(ctx, "input-one-fail")
 		require.Error(t, err)
@@ -788,7 +788,7 @@ func BenchmarkRetry(b *testing.B) {
 		successStage := fluxus.StageFunc[string, string](func(_ context.Context, s string) (string, error) {
 			return s, nil
 		})
-		retryStage := fluxus.NewRetry[string, string](successStage, 5) // Max attempts don't matter here
+		retryStage := fluxus.NewRetry(successStage, 5) // Max attempts don't matter here
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -804,7 +804,7 @@ func BenchmarkRetry(b *testing.B) {
 		failStage := fluxus.StageFunc[string, string](func(_ context.Context, _ string) (string, error) {
 			return "", failErr
 		})
-		retryStage := fluxus.NewRetry[string, string](failStage, maxAttempts)
+		retryStage := fluxus.NewRetry(failStage, maxAttempts)
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -821,7 +821,7 @@ func BenchmarkRetry(b *testing.B) {
 			return "", failErr
 		})
 		// Simple constant backoff for predictability
-		retryStage := fluxus.NewRetry[string, string](failStage, maxAttempts).
+		retryStage := fluxus.NewRetry(failStage, maxAttempts).
 			WithBackoff(func(_ int) int { return 1 }) // 1ms backoff
 
 		b.ResetTimer()
@@ -848,7 +848,7 @@ func BenchmarkRetryConcurrency(b *testing.B) {
 				processingDelay: 0,
 			}
 			serviceStage := fluxus.StageFunc[string, string](service.Process)
-			retryStage := fluxus.NewRetry[string, string](serviceStage, maxAttempts)
+			retryStage := fluxus.NewRetry(serviceStage, maxAttempts)
 
 			b.ResetTimer()
 			b.SetParallelism(level)
@@ -885,7 +885,7 @@ func TestTimeoutSuccess(t *testing.T) {
 	stageDelay := 20 * time.Millisecond
 	timeoutDuration := 50 * time.Millisecond
 	mockStage := newDelayedMockStage(stageDelay, true, nil)
-	timeoutStage := fluxus.NewTimeout[string, string](mockStage, timeoutDuration)
+	timeoutStage := fluxus.NewTimeout(mockStage, timeoutDuration)
 	ctx := context.Background()
 
 	result, err := timeoutStage.Process(ctx, "input-fast")
@@ -900,7 +900,7 @@ func TestTimeoutExpired(t *testing.T) {
 	stageDelay := 100 * time.Millisecond
 	timeoutDuration := 30 * time.Millisecond
 	mockStage := newDelayedMockStage(stageDelay, true, nil) // Would succeed if not timed out
-	timeoutStage := fluxus.NewTimeout[string, string](mockStage, timeoutDuration)
+	timeoutStage := fluxus.NewTimeout(mockStage, timeoutDuration)
 	ctx := context.Background()
 
 	startTime := time.Now()
@@ -927,7 +927,7 @@ func TestTimeoutStageError(t *testing.T) {
 	timeoutDuration := 50 * time.Millisecond
 	stageErr := errors.New("underlying stage error")
 	mockStage := newDelayedMockStage(stageDelay, false, stageErr) // Fails quickly
-	timeoutStage := fluxus.NewTimeout[string, string](mockStage, timeoutDuration)
+	timeoutStage := fluxus.NewTimeout(mockStage, timeoutDuration)
 	ctx := context.Background()
 
 	_, err := timeoutStage.Process(ctx, "input-stage-fail")
@@ -945,7 +945,7 @@ func TestTimeoutParentContextCancelled(t *testing.T) {
 	parentCancelDelay := 50 * time.Millisecond
 
 	mockStage := newDelayedMockStage(stageDelay, true, nil)
-	timeoutStage := fluxus.NewTimeout[string, string](mockStage, timeoutDuration)
+	timeoutStage := fluxus.NewTimeout(mockStage, timeoutDuration)
 
 	parentCtx, cancel := context.WithTimeout(context.Background(), parentCancelDelay)
 	defer cancel()
@@ -970,7 +970,7 @@ func TestTimeoutErrorHandler(t *testing.T) {
 	customErr := errors.New("custom timeout wrapper")
 
 	mockStage := newDelayedMockStage(stageDelay, true, nil)
-	timeoutStage := fluxus.NewTimeout[string, string](mockStage, timeoutDuration).
+	timeoutStage := fluxus.NewTimeout(mockStage, timeoutDuration).
 		WithErrorHandler(func(err error) error {
 			// Only wrap timeout errors
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -1000,7 +1000,7 @@ func BenchmarkTimeout(b *testing.B) {
 		fastStage := fluxus.StageFunc[string, string](func(_ context.Context, s string) (string, error) {
 			return s, nil
 		})
-		timeoutStage := fluxus.NewTimeout[string, string](fastStage, timeoutDuration)
+		timeoutStage := fluxus.NewTimeout(fastStage, timeoutDuration)
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -1013,7 +1013,7 @@ func BenchmarkTimeout(b *testing.B) {
 	b.Run("AlwaysTimesOut", func(b *testing.B) {
 		// Use a mock that takes longer than the timeout
 		slowStage := newDelayedMockStage(timeoutDuration*2, true, nil)
-		timeoutStage := fluxus.NewTimeout[string, string](slowStage, timeoutDuration)
+		timeoutStage := fluxus.NewTimeout(slowStage, timeoutDuration)
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -1036,7 +1036,7 @@ func BenchmarkTimeoutConcurrency(b *testing.B) {
 			// Alternatively, use a probabilistic delay. Let's use fixed for simplicity.
 			stageDelay := 10 * time.Millisecond // Shorter than timeout, but concurrency might push some over
 			mockStage := newDelayedMockStage(stageDelay, true, nil)
-			timeoutStage := fluxus.NewTimeout[string, string](mockStage, timeoutDuration)
+			timeoutStage := fluxus.NewTimeout(mockStage, timeoutDuration)
 
 			b.ResetTimer()
 			b.SetParallelism(level)
@@ -1314,7 +1314,7 @@ func TestDeadLetterQueuePanicNilHandler(t *testing.T) {
 	assert.PanicsWithValue(t,
 		"fluxus.NewDeadLetterQueue: DLQHandler must be provided using the WithDLQHandler option",
 		func() {
-			_ = fluxus.NewDeadLetterQueue[string, string](mockStage)
+			_ = fluxus.NewDeadLetterQueue(mockStage)
 		},
 		"Should panic if WithDLQHandler is missing",
 	)
@@ -1323,7 +1323,7 @@ func TestDeadLetterQueuePanicNilHandler(t *testing.T) {
 	assert.PanicsWithValue(t,
 		"fluxus.WithDLQHandler: provided DLQHandler cannot be nil",
 		func() {
-			_ = fluxus.NewDeadLetterQueue[string, string](mockStage, fluxus.WithDLQHandler[string, string](nil))
+			_ = fluxus.NewDeadLetterQueue(mockStage, fluxus.WithDLQHandler[string, string](nil))
 		},
 		"Should panic if nil is passed to WithDLQHandler",
 	)
