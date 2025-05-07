@@ -549,17 +549,20 @@ func BenchmarkComponentComparison(b *testing.B) {
 // Simple no-op metrics collector for benchmarks
 type noopMetricsCollector struct{}
 
-func (n *noopMetricsCollector) StageStarted(_ context.Context, _ string) {}
-func (n *noopMetricsCollector) StageCompleted(_ context.Context, _ string, _ time.Duration) {
+func (*noopMetricsCollector) StageStarted(_ context.Context, _ string)                            {}
+func (*noopMetricsCollector) StageCompleted(_ context.Context, _ string, _ time.Duration)         {}
+func (*noopMetricsCollector) StageError(_ context.Context, _ string, _ error)                     {}
+func (*noopMetricsCollector) RetryAttempt(_ context.Context, _ string, _ int, _ error)            {}
+func (*noopMetricsCollector) BufferBatchProcessed(_ context.Context, _ int, _ time.Duration)      {}
+func (*noopMetricsCollector) FanOutStarted(_ context.Context, _ string, _ int)                    {}
+func (*noopMetricsCollector) FanOutCompleted(_ context.Context, _ string, _ int, _ time.Duration) {}
+func (*noopMetricsCollector) FanInStarted(_ context.Context, _ string, _ int)                     {}
+func (*noopMetricsCollector) FanInCompleted(_ context.Context, _ string, _ int, _ time.Duration)  {}
+func (*noopMetricsCollector) PipelineStarted(_ context.Context, _ string)                         {}
+func (*noopMetricsCollector) PipelineCompleted(_ context.Context, _ string, _ time.Duration, _ error) {
 }
-func (n *noopMetricsCollector) StageError(_ context.Context, _ string, _ error) {}
-func (n *noopMetricsCollector) RetryAttempt(_ context.Context, _ string, _ int, _ error) {
-}
-func (n *noopMetricsCollector) BufferBatchProcessed(_ context.Context, _ int, _ time.Duration) {
-}
-func (n *noopMetricsCollector) FanOutStarted(_ context.Context, _ int) {}
-func (n *noopMetricsCollector) FanOutCompleted(_ context.Context, _ int, _ time.Duration) {
-}
-func (n *noopMetricsCollector) FanInStarted(_ context.Context, _ int) {}
-func (n *noopMetricsCollector) FanInCompleted(_ context.Context, _ int, _ time.Duration) {
-}
+func (*noopMetricsCollector) StageWorkerConcurrency(_ context.Context, _ string, _ int)             {}
+func (*noopMetricsCollector) StageWorkerItemProcessed(_ context.Context, _ string, _ time.Duration) {}
+func (*noopMetricsCollector) StageWorkerItemSkipped(_ context.Context, _ string, _ error)           {}
+func (*noopMetricsCollector) StageWorkerErrorSent(_ context.Context, _ string, _ error)             {}
+func (*noopMetricsCollector) WindowEmitted(_ context.Context, _ string, _ int)                      {}

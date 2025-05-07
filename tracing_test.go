@@ -61,7 +61,6 @@ func hasAttributeWithValue(span sdktrace.ReadOnlySpan, key string, value string)
 func TestTracedStage(t *testing.T) {
 	// Create a test tracer with recorder
 	recorder, provider := createTestTracer()
-	tracer := provider.Tracer("test-tracer")
 
 	// Create a simple stage
 	stage := fluxus.StageFunc[string, string](func(_ context.Context, input string) (string, error) {
@@ -71,8 +70,8 @@ func TestTracedStage(t *testing.T) {
 	// Wrap it with tracing
 	traced := fluxus.NewTracedStage(
 		stage,
-		fluxus.WithTracerName[string, string]("test_stage"),
-		fluxus.WithTracer[string, string](tracer),
+		fluxus.WithTracerStageName[string, string]("test_stage"),
+		fluxus.WithTracerProvider[string, string](provider),
 		fluxus.WithTracerAttributes[string, string](
 			attribute.String("test", "value"),
 		),
@@ -109,7 +108,7 @@ func TestTracedStage(t *testing.T) {
 	}
 
 	// Check for duration attribute
-	_, hasDuration := findAttribute(span, "duration_ms")
+	_, hasDuration := findAttribute(span, "fluxus.stage.duration_ms")
 	if !hasDuration {
 		t.Errorf("Duration attribute not found in span attributes: %v", span.Attributes())
 	}
@@ -124,7 +123,6 @@ func TestTracedStage(t *testing.T) {
 func TestTracedStageError(t *testing.T) {
 	// Create a test tracer with recorder
 	recorder, provider := createTestTracer()
-	tracer := provider.Tracer("test-tracer")
 
 	// Create a stage that returns an error
 	expectedErr := errors.New("test error")
@@ -135,8 +133,8 @@ func TestTracedStageError(t *testing.T) {
 	// Wrap it with tracing
 	traced := fluxus.NewTracedStage(
 		stage,
-		fluxus.WithTracerName[string, string]("error_stage"),
-		fluxus.WithTracer[string, string](tracer),
+		fluxus.WithTracerStageName[string, string]("error_stage"),
+		fluxus.WithTracerProvider[string, string](provider),
 	)
 
 	// Process input
@@ -182,7 +180,6 @@ func TestTracedStageError(t *testing.T) {
 func TestTracedFanOut(t *testing.T) {
 	// Create a test tracer with recorder
 	recorder, provider := createTestTracer()
-	tracer := provider.Tracer("test-tracer")
 
 	// Create stages for FanOut
 	stage1 := fluxus.StageFunc[string, string](func(_ context.Context, input string) (string, error) {
@@ -199,16 +196,12 @@ func TestTracedFanOut(t *testing.T) {
 	// Create a traced fan-out wrapper
 	tracedFanOut := fluxus.NewTracedFanOut(
 		fanOut,
-		"test_fan_out",
-		attribute.String("test", "value"),
+		fluxus.WithTracerStageName[string, []string]("test_fan_out"),
+		fluxus.WithTracerAttributes[string, []string](
+			attribute.String("test", "value"),
+		),
+		fluxus.WithTracerProvider[string, []string](provider),
 	)
-
-	// Use a type assertion to access the WithTracer method
-	if traceable, ok := tracedFanOut.(*fluxus.TracedFanOutStage[string, string]); ok {
-		traceable.WithTracer(tracer)
-	} else {
-		t.Fatal("Cannot cast to TracedFanOutStage")
-	}
 
 	// Process input
 	results, err := tracedFanOut.Process(context.Background(), "Hello")
@@ -236,13 +229,13 @@ func TestTracedFanOut(t *testing.T) {
 	}
 
 	// Check for num_stages attribute
-	numStagesAttr, hasNumStages := findAttribute(span, "num_stages")
+	numStagesAttr, hasNumStages := findAttribute(span, "fluxus.stage.num_stages")
 	if !hasNumStages || numStagesAttr.Value.AsInt64() != 2 {
 		t.Errorf("Attribute 'num_stages=2' not found or incorrect in span attributes: %v", span.Attributes())
 	}
 
 	// Check for num_results attribute
-	numResultsAttr, hasNumResults := findAttribute(span, "num_results")
+	numResultsAttr, hasNumResults := findAttribute(span, "fluxus.stage.num_results")
 	if !hasNumResults || numResultsAttr.Value.AsInt64() != 2 {
 		t.Errorf("Attribute 'num_results=2' not found or incorrect in span attributes: %v", span.Attributes())
 	}
@@ -252,7 +245,6 @@ func TestTracedFanOut(t *testing.T) {
 func TestTracedRetry(t *testing.T) {
 	// Create a test tracer with recorder
 	recorder, provider := createTestTracer()
-	tracer := provider.Tracer("test-tracer")
 
 	// Create a stage that fails a few times then succeeds
 	var mu sync.Mutex
@@ -276,16 +268,12 @@ func TestTracedRetry(t *testing.T) {
 	// Create a traced retry wrapper
 	tracedRetry := fluxus.NewTracedRetry(
 		retry,
-		"test_retry",
-		attribute.String("test", "value"),
+		fluxus.WithTracerStageName[string, string]("test_retry"),
+		fluxus.WithTracerProvider[string, string](provider),
+		fluxus.WithTracerAttributes[string, string](
+			attribute.String("test", "value"),
+		),
 	)
-
-	// Use a type assertion to access the WithTracer method
-	if traceable, ok := tracedRetry.(*fluxus.TracedRetryStage[string, string]); ok {
-		traceable.WithTracer(tracer)
-	} else {
-		t.Fatal("Cannot cast to TracedRetryStage")
-	}
 
 	// Process input
 	result, err := tracedRetry.Process(context.Background(), "test")
@@ -314,7 +302,7 @@ func TestTracedRetry(t *testing.T) {
 	}
 
 	// Check for max_attempts attribute
-	maxAttemptsAttr, hasMaxAttempts := findAttribute(mainSpan, "max_attempts")
+	maxAttemptsAttr, hasMaxAttempts := findAttribute(mainSpan, "fluxus.stage.max_attempts")
 	if !hasMaxAttempts || maxAttemptsAttr.Value.AsInt64() != int64(maxFailures+1) {
 		t.Errorf("Attribute 'max_attempts=%d' not found or incorrect in span attributes: %v",
 			maxFailures+1, mainSpan.Attributes())
@@ -374,10 +362,8 @@ func BenchmarkTracing(b *testing.B) {
 
 	// Create tracers for testing
 	noopProvider := createNoopTracer()
-	noopTracer := noopProvider.Tracer("benchmark-noop")
 
 	_, recordingProvider := createRecordingTracer()
-	recordingTracer := recordingProvider.Tracer("benchmark-recording")
 
 	// Test inputs of different sizes
 	inputs := []string{
@@ -407,8 +393,8 @@ func BenchmarkTracing(b *testing.B) {
 		b.Run("SimpleStage_NoopTracing_"+inputName, func(b *testing.B) {
 			tracedStage := fluxus.NewTracedStage(
 				simpleStage,
-				fluxus.WithTracerName[string, string]("benchmark-simple"),
-				fluxus.WithTracer[string, string](noopTracer),
+				fluxus.WithTracerStageName[string, string]("benchmark-simple"),
+				fluxus.WithTracerProvider[string, string](noopProvider),
 				fluxus.WithTracerAttributes[string, string](
 					attribute.String("benchmark", "true"),
 				),
@@ -424,8 +410,8 @@ func BenchmarkTracing(b *testing.B) {
 		b.Run("SimpleStage_Recording_"+inputName, func(b *testing.B) {
 			tracedStage := fluxus.NewTracedStage(
 				simpleStage,
-				fluxus.WithTracerName[string, string]("benchmark-simple"),
-				fluxus.WithTracer[string, string](recordingTracer),
+				fluxus.WithTracerStageName[string, string]("benchmark-simple"),
+				fluxus.WithTracerProvider[string, string](recordingProvider),
 				fluxus.WithTracerAttributes[string, string](
 					attribute.String("benchmark", "true"),
 				),
@@ -450,8 +436,8 @@ func BenchmarkTracing(b *testing.B) {
 		b.Run("ComplexStage_NoopTracing_"+inputName, func(b *testing.B) {
 			tracedStage := fluxus.NewTracedStage(
 				complexStage,
-				fluxus.WithTracerName[string, string]("benchmark-complex"),
-				fluxus.WithTracer[string, string](noopTracer),
+				fluxus.WithTracerStageName[string, string]("benchmark-complex"),
+				fluxus.WithTracerProvider[string, string](noopProvider),
 				fluxus.WithTracerAttributes[string, string](
 					attribute.String("benchmark", "true"),
 				),
@@ -467,8 +453,8 @@ func BenchmarkTracing(b *testing.B) {
 		b.Run("ComplexStage_Recording_"+inputName, func(b *testing.B) {
 			tracedStage := fluxus.NewTracedStage(
 				complexStage,
-				fluxus.WithTracerName[string, string]("benchmark-complex"),
-				fluxus.WithTracer[string, string](recordingTracer),
+				fluxus.WithTracerStageName[string, string]("benchmark-complex"),
+				fluxus.WithTracerProvider[string, string](recordingProvider),
 				fluxus.WithTracerAttributes[string, string](
 					attribute.String("benchmark", "true"),
 				),
@@ -486,7 +472,6 @@ func BenchmarkTracing(b *testing.B) {
 func BenchmarkTracedComponents(b *testing.B) {
 	// Create a noop tracer for benchmarking
 	noopProvider := createNoopTracer()
-	noopTracer := noopProvider.Tracer("benchmark-components")
 
 	// Create simple stages for the test
 	simpleStage := fluxus.StageFunc[string, string](func(_ context.Context, input string) (string, error) {
@@ -509,8 +494,8 @@ func BenchmarkTracedComponents(b *testing.B) {
 	b.Run("TracedStage", func(b *testing.B) {
 		tracedStage := fluxus.NewTracedStage(
 			simpleStage,
-			fluxus.WithTracerName[string, string]("benchmark"),
-			fluxus.WithTracer[string, string](noopTracer),
+			fluxus.WithTracerStageName[string, string]("benchmark"),
+			fluxus.WithTracerProvider[string, string](noopProvider),
 		)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -523,11 +508,13 @@ func BenchmarkTracedComponents(b *testing.B) {
 		fanOut := fluxus.NewFanOut(simpleStage, simpleStage)
 		tracedFanOut := fluxus.NewTracedFanOut(
 			fanOut,
-			"benchmark-fanout",
+			fluxus.WithTracerStageName[string, []string]("benchmark-fanout"),
+			fluxus.WithTracerProvider[string, []string](noopProvider),
+			// "benchmark-fanout",
 		)
-		if traceable, ok := tracedFanOut.(*fluxus.TracedFanOutStage[string, string]); ok {
-			traceable.WithTracer(noopTracer)
-		}
+		// if traceable, ok := tracedFanOut.(*fluxus.TracedFanOutStage[string, string]); ok {
+		// 	traceable.WithTracerProvider(noopProvider)
+		// }
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			_, _ = tracedFanOut.Process(ctx, input)
@@ -539,11 +526,13 @@ func BenchmarkTracedComponents(b *testing.B) {
 		retry := fluxus.NewRetry(simpleStage, 1) // Just 1 attempt since it won't fail
 		tracedRetry := fluxus.NewTracedRetry(
 			retry,
-			"benchmark-retry",
+			fluxus.WithTracerStageName[string, string]("benchmark-retry"),
+			fluxus.WithTracerProvider[string, string](noopProvider),
+			// "benchmark-retry",
 		)
-		if traceable, ok := tracedRetry.(*fluxus.TracedRetryStage[string, string]); ok {
-			traceable.WithTracer(noopTracer)
-		}
+		// if traceable, ok := tracedRetry.(*fluxus.TracedRetryStage[string, string]); ok {
+		// 	traceable.WithTracerProvider(noopProvider)
+		// }
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			_, _ = tracedRetry.Process(ctx, input)
@@ -553,13 +542,13 @@ func BenchmarkTracedComponents(b *testing.B) {
 	// Benchmark traced pipeline
 	b.Run("TracedPipeline", func(b *testing.B) {
 		pipeline := fluxus.NewPipeline(simpleStage)
+
 		tracedPipeline := fluxus.NewTracedPipeline(
 			pipeline,
-			"benchmark-pipeline",
+			fluxus.WithTracerPipelineName[string, string]("benchmark-pipeline"),
+			fluxus.WithTracerPipelineProvider[string, string](noopProvider),
 		)
-		if traceable, ok := tracedPipeline.(*fluxus.TracedPipelineStage[string, string]); ok {
-			traceable.WithTracer(noopTracer)
-		}
+
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			_, _ = tracedPipeline.Process(ctx, input)
@@ -574,7 +563,6 @@ type Value any
 func BenchmarkTracingWithContext(b *testing.B) {
 	// Create a noop tracer for benchmarking
 	noopProvider := createNoopTracer()
-	noopTracer := noopProvider.Tracer("benchmark-context")
 
 	// Create a stage that reads from context
 	ctxAwareStage := fluxus.StageFunc[string, string](func(ctx context.Context, input string) (string, error) {
@@ -603,8 +591,8 @@ func BenchmarkTracingWithContext(b *testing.B) {
 	// Traced stage
 	tracedStage := fluxus.NewTracedStage(
 		ctxAwareStage,
-		fluxus.WithTracerName[string, string]("benchmark-context"),
-		fluxus.WithTracer[string, string](noopTracer),
+		fluxus.WithTracerStageName[string, string]("benchmark-context"),
+		fluxus.WithTracerProvider[string, string](noopProvider),
 	)
 
 	// Benchmark with empty context
@@ -620,18 +608,6 @@ func BenchmarkTracingWithContext(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			_, _ = tracedStage.Process(ctxWithValues, input)
-		}
-	})
-
-	// Create a parent span context
-	ctx, span := noopTracer.Start(context.Background(), "parent-span")
-	defer span.End()
-
-	// Benchmark with span context
-	b.Run("ContextWithSpan", func(b *testing.B) {
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_, _ = tracedStage.Process(ctx, input)
 		}
 	})
 }

@@ -1,11 +1,59 @@
 package fluxus
 
 import (
+	"bytes"
 	"fmt"
-	"strings"
 )
 
 // Error types for specific failure scenarios in pipeline processing
+
+// --- Pipeline Lifecycle/Configuration Errors ---
+
+// PipelineConfigurationError represents an error during pipeline setup or configuration.
+type PipelineConfigurationError struct {
+	Reason string
+}
+
+func (e *PipelineConfigurationError) Error() string {
+	return fmt.Sprintf("pipeline configuration error: %s", e.Reason)
+}
+
+// NewPipelineConfigurationError creates a new configuration error.
+func NewPipelineConfigurationError(reason string) error {
+	return &PipelineConfigurationError{Reason: reason}
+}
+
+// PipelineLifecycleError represents an error related to the pipeline's state (Start/Stop).
+type PipelineLifecycleError struct {
+	Operation string // e.g., "Start", "Stop", "Wait"
+	Reason    string
+	Err       error // Optional underlying error
+}
+
+func (e *PipelineLifecycleError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("pipeline %s failed: %s: %v", e.Operation, e.Reason, e.Err)
+	}
+	return fmt.Sprintf("pipeline %s failed: %s", e.Operation, e.Reason)
+}
+
+func (e *PipelineLifecycleError) Unwrap() error {
+	return e.Err
+}
+
+// NewPipelineLifecycleError creates a new lifecycle error.
+func NewPipelineLifecycleError(operation, reason string, err error) error {
+	return &PipelineLifecycleError{Operation: operation, Reason: reason, Err: err}
+}
+
+// Predefined Lifecycle/Config Errors (Examples)
+var (
+	ErrPipelineAlreadyStarted = NewPipelineLifecycleError("Start", "pipeline already started", nil)
+	ErrPipelineNotStarted     = NewPipelineLifecycleError("Wait/Stop", "pipeline not started", nil)
+	ErrEmptyPipeline          = NewPipelineConfigurationError("cannot build or run an empty pipeline")
+	// You could add more specific ones like ErrIncompatibleSourceType, ErrIncompatibleSinkType etc.
+	// Or wrap them using the base types above.
+)
 
 // StageError represents an error that occurred in a specific pipeline stage.
 type StageError struct {
@@ -155,44 +203,53 @@ type MultiError struct {
 	Errors []error
 }
 
-// NewMultiError creates a new MultiError.
+// NewMultiError creates a MultiError, filtering out nil errors.
 func NewMultiError(errs []error) *MultiError {
-	// Filter out nil errors
-	nonNilErrs := make([]error, 0, len(errs))
+	filtered := make([]error, 0, len(errs))
 	for _, err := range errs {
 		if err != nil {
-			nonNilErrs = append(nonNilErrs, err)
+			filtered = append(filtered, err)
 		}
 	}
-	if len(nonNilErrs) == 0 {
-		return nil // Return nil if there are no actual errors
+	if len(filtered) == 0 {
+		return nil // Return nil if no actual errors
 	}
-	return &MultiError{Errors: nonNilErrs}
+	return &MultiError{Errors: filtered}
 }
 
 // Error implements the error interface.
 func (m *MultiError) Error() string {
-	if m == nil || len(m.Errors) == 0 {
-		return "no errors"
+	if !m.HasErrors() {
+		return ""
 	}
-	if len(m.Errors) == 1 {
-		return m.Errors[0].Error()
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%d errors occurred:", len(m.Errors))
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "%d error(s) occurred:", len(m.Errors))
 	for i, err := range m.Errors {
-		fmt.Fprintf(&b, "\n  [%d] %v", i, err)
+		fmt.Fprintf(&buf, "\n\t[%d] %s", i, err)
 	}
-	return b.String()
+	return buf.String()
+}
+
+// Add appends a non-nil error to the list.
+func (m *MultiError) Add(err error) {
+	if err != nil {
+		m.Errors = append(m.Errors, err)
+	}
+}
+
+// HasErrors returns true if there are any errors.
+func (m *MultiError) HasErrors() bool {
+	return m != nil && len(m.Errors) > 0
 }
 
 // Unwrap provides compatibility with errors.Is/As by returning the first error.
 // You might choose a different behavior depending on your needs.
 func (m *MultiError) Unwrap() error {
-	if m == nil || len(m.Errors) == 0 {
-		return nil
+	if m.HasErrors() {
+		return m.Errors[0]
 	}
-	return m.Errors[0]
+
+	return nil
 }
 
 // MapItemError represents an error that occurred while processing a specific item
