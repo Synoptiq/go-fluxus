@@ -29,6 +29,7 @@ type mockMetricsCollector struct {
 	stageWorkerItemProcessed int64 // Added
 	stageWorkerItemSkipped   int64 // Added
 	stageWorkerErrorSent     int64 // Added
+	windowEmitted            int64 // Added
 }
 
 func (m *mockMetricsCollector) PipelineStarted(_ context.Context, _ string) {
@@ -89,6 +90,10 @@ func (m *mockMetricsCollector) FanInStarted(_ context.Context, _ string, _ int) 
 
 func (m *mockMetricsCollector) FanInCompleted(_ context.Context, _ string, _ int, _ time.Duration) {
 	atomic.AddInt64(&m.fanInCompleted, 1)
+}
+
+func (m *mockMetricsCollector) WindowEmitted(_ context.Context, _ string, _ int) {
+	atomic.AddInt64(&m.windowEmitted, 1)
 }
 
 // TestMetricatedStage tests the basic MetricatedStage functionality
