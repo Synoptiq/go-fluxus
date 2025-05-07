@@ -147,7 +147,7 @@ func TestComplexPipeline(t *testing.T) {
 	})
 
 	// Create the parallel part
-	parallelStage := fluxus.Parallel[[]string, string, []string](
+	parallelStage := fluxus.Parallel(
 		[]fluxus.Stage[[]string, string]{func2, func3},
 		func(results []string) ([]string, error) {
 			return results, nil

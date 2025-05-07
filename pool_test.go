@@ -203,7 +203,7 @@ func TestPooledStage(t *testing.T) {
 	})
 
 	// Create an object pool
-	objectPool := fluxus.NewObjectPool[interface{}](
+	objectPool := fluxus.NewObjectPool(
 		func() interface{} { return "pooled-object" },
 		fluxus.WithPoolName[interface{}]("test-pool"),
 	)
@@ -232,7 +232,7 @@ func TestPooledStage(t *testing.T) {
 func TestPooledBuffer(t *testing.T) {
 	// Create a pooled buffer
 	batchSize := 3
-	buffer := fluxus.NewPooledBuffer[int, int](
+	buffer := fluxus.NewPooledBuffer(
 		batchSize,
 		func(_ context.Context, batch []int) ([]int, error) {
 			// Double each item
@@ -360,7 +360,7 @@ func TestPooledBufferInPipeline(t *testing.T) {
 	})
 
 	// Create a Buffer that processes batches of strings
-	pooledBuffer := fluxus.NewPooledBuffer[string, string](
+	pooledBuffer := fluxus.NewPooledBuffer(
 		3, // batch size
 		func(_ context.Context, batch []string) ([]string, error) {
 			results := make([]string, len(batch))
@@ -584,12 +584,12 @@ func BenchmarkPooledPipeline(b *testing.B) {
 
 	// Create pools for different object types
 	// CHANGE: Use SlicePool instead of ObjectPool for byte buffers
-	bufferPool := fluxus.NewSlicePool[byte](
+	bufferPool := fluxus.NewSlicePool(
 		1024,
 		fluxus.WithPoolName[[]byte]("buffer-pool"),
 	)
 
-	slicePool := fluxus.NewSlicePool[string](
+	slicePool := fluxus.NewSlicePool(
 		100,
 		fluxus.WithPoolName[[]string]("string-slice-pool"),
 	)
@@ -922,7 +922,7 @@ func BenchmarkRealWorldScenario(b *testing.B) {
 	)
 
 	// Stage 3: Buffer and batch process the records
-	batchProcess := fluxus.NewPooledBuffer[*ProcessedRecord, *ProcessedRecord](
+	batchProcess := fluxus.NewPooledBuffer(
 		10, // batch size
 		func(_ context.Context, batch []*ProcessedRecord) ([]*ProcessedRecord, error) {
 			// Process the batch

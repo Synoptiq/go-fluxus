@@ -553,7 +553,7 @@ func TestRouterNilSelector(t *testing.T) {
 	routes := []fluxus.Route[string, string]{
 		{Name: "A", Stage: makeSimpleStage("A", 0, false)},
 	}
-	router := fluxus.NewRouter[string, string](nil, routes...) // Pass nil selector
+	router := fluxus.NewRouter(nil, routes...) // Pass nil selector
 
 	_, err := router.Process(context.Background(), "input")
 	require.Error(t, err)
