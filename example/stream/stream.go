@@ -236,7 +236,7 @@ func main() {
 	b5 := fluxus.AddStage(b4, "action_stage", actionStage)
 
 	// Finalize
-	pipeline, err := fluxus.Finalize(b5)
+	pipeline, err := fluxus.Finalize[RawEvent](b5)
 	if err != nil {
 		log.Fatalf("❌ Failed to build pipeline: %v", err)
 	}
@@ -253,7 +253,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		fmt.Println("⏳ Pipeline Run started...")
-		runErr = fluxus.Run(ctx, pipeline, source, sink)
+		runErr = pipeline.Run(ctx, source, sink)
 		if runErr != nil {
 			// Log errors other than context cancellation
 			if !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, context.DeadlineExceeded) {

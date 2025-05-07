@@ -11,6 +11,7 @@ Unlike standard pipelines that process a single input to produce a single output
 - Support backpressure to handle varying processing rates
 - Allow for concurrent processing
 - Properly handle cancellation and cleanup
+- Support lifecycle control through explicit `Start`, `Wait` and `Stop` methods.
 
 ## Core Components
 
@@ -79,42 +80,98 @@ builder := fluxus.NewStreamPipeline[InputType](
     fluxus.WithStreamLogger(logger),
     fluxus.WithStreamBufferSize(10),
     fluxus.WithStreamConcurrency(4),
+    fluxus.WithStreamTracerProvider(tracerProvider), // Optional: Set up OpenTelemetry tracing
+	fluxus.WithStreamMetricsCollector(metricsCollector) // Optional: Set up metrics collection
 )
 
 // Add stages, maintaining type safety
-b2 := fluxus.AddStage(builder, stage1)
-b3 := fluxus.AddStage(b2, stage2)
-b4 := fluxus.AddStage(b3, stage3)
+b2 := fluxus.AddStage(builder, "stage-1", stage1)
+b3 := fluxus.AddStage(b2, "stage-2", stage2)
+b4 := fluxus.AddStage(b3, "stage-3", stage3)
+
+// Add a custom StreamStage directly
+// b5 := fluxus.AddStreamStage(b4, "stream-stage", customStreamStage)
 
 // Finalize the pipeline
-pipeline, err := fluxus.Finalize(b4)
+// Specify the pipeline's overall Input and final Output types
+pipeline, err := fluxus.Finalize[InputType, OutputType](b4)
 if err != nil {
     log.Fatalf("Failed to build pipeline: %v", err)
 }
 ```
 
+### Lifecycle Management
+
+Stream pipelines now have explicit `Start()`, `Wait()`, and `Stop()` methods to control their lifecycle:
+
+```go
+pipeline := /* ... build pipeline ... */
+
+// Start the pipeline (non-blocking)
+err := pipeline.Start(ctx, source, sink)
+if err != nil {
+    log.Fatalf("Failed to start pipeline: %v", err)
+}
+
+// Wait for the pipeline to complete or encounter an error (blocking)
+if err := pipeline.Wait(); err != nil {
+    log.Printf("Pipeline finished with error: %v", err)
+}
+
+// Gracefully stop the pipeline (can be called even if not Wait-ing)
+if err := pipeline.Stop(ctx); err != nil {
+	log.Printf("Error stopping pipeline: %v", err)
+}
+```
+
+*Key points*:
+
+ - `Start`: Initializes the pipeline and launches processing goroutines (non-blocking).
+ - `Wait`: Blocks until processing finishes (after the source channel is closed) or an error occurs.
+ - `Stop`: Gracefully shuts down the pipeline, cancels any running goroutines, and calls `Stop` on any stages implementing the `Stopper` interface.
+ - The global `Run` function is a helper that calls these three methods sequentially.
+
+ Errors during these lifecycle operations (like starting an already started pipeline or stopping with a timeout) are reported using specific types like `fluxus.ErrPipelineAlreadyStarted`, `fluxus.ErrPipelineNotStarted`, or `fluxus.PipelineLifecycleError`.
+
+### Starter and Stopper Stages
+
+Stages can optionally implement `Starter` and `Stopper` interfaces to manage resources:
+
+```go
+type Starter interface {
+	Start(ctx context.Context) error
+}
+
+type Stopper interface {
+	Stop(ctx context.Context) error
+}
+```
+
+The pipeline will call these methods when you call `pipeline.Start` and `pipeline.Stop`.
+
 ## Running Stream Pipelines
 
 To run a stream pipeline, you need to provide source and sink channels:
+
+Note: `pipeline.Start()` and `pipeline.Run()` now accept typed channels (`<-chan I`, `chan<- O`), providing compile-time safety for the pipeline's input and output. Ensure the pipeline variable and channels match the types specified during `Finalize[I, O]`.
 
 ```go
 // Create channels
 source := make(chan int)
 sink := make(chan OutputType)
 
-// Run the pipeline in a goroutine
-var wg sync.WaitGroup
-wg.Add(1)
-go func() {
-    defer wg.Done()
-    if err := fluxus.Run(ctx, pipeline, source, sink); err != nil {
-        log.Printf("Pipeline error: %v", err)
-    }
-}()
+// Create a context
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
 
-// Feed data to the source
+// Start the pipeline (non-blocking)
+if err := pipeline.Start(ctx, source, sink); err != nil {
+	log.Fatalf("Failed to start pipeline: %v", err)
+}
+
+// Feed data to the source in a goroutine
 go func() {
-    defer close(source) // Always close the source when done feeding
+    defer close(source) // IMPORTANT: Always close the source when done feeding
     for i := 0; i < 10; i++ {
         select {
         case source <- i:
@@ -126,17 +183,96 @@ go func() {
     }
 }()
 
-// Process results from the sink
-for result := range sink {
-    // Do something with the result
-    fmt.Println(result)
+// Process results from the sink in the main goroutine (or another one)
+go func(){
+    for result := range sink {
+        // Do something with the result
+        fmt.Println(result)
+    }
+}()
+
+// Wait for pipeline to complete or error out (blocking)
+if err := pipeline.Wait(); err != nil {
+    log.Printf("Pipeline error: %v", err)
 }
 
-// Wait for pipeline completion
+// Gracefully stop the pipeline if it's still running
+if err := pipeline.Stop(ctx); err != nil {
+	log.Printf("Error stopping pipeline: %v", err)
+}
+```
+
+The `Run` function simplifies this pattern:
+
+```go
+// Create channels
+source := make(chan int)
+sink := make(chan OutputType) // Replace OutputType with the actual output type
+
+// Create a context
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+// Run the pipeline in a goroutine. This combines Start, Wait and Stop
+var runErr error
+var wg sync.WaitGroup
+wg.Add(1)
+go func() {
+    defer wg.Done()
+    // Run blocks until the pipeline finishes or the context is cancelled
+    // pipeline must be *fluxus.StreamPipeline[int, OutputType]
+    // source must be chan int (or <-chan int)
+    // sink must be chan OutputType (or chan<- OutputType)
+    runErr = pipeline.Run(ctx, source, sink)
+    if runErr != nil && !errors.Is(runErr, context.Canceled) {
+        log.Printf("Pipeline Run error: %v", runErr)
+    }
+}()
+
+// Feed data to the source in another goroutine
+go func() {
+    defer close(source) // IMPORTANT: Always close the source when done feeding
+    for i := 0; i < 10; i++ {
+        select {
+        case source <- i:
+            // Item sent successfully
+        case <-ctx.Done():
+            // Context cancelled, stop sending
+            log.Println("Source feeding cancelled.")
+            return
+        }
+    }
+    log.Println("Source feeding finished.")
+}()
+
+// Process results from the sink in the main goroutine (or another one)
+// This goroutine will finish when the sink channel is closed by Run
+go func() {
+    for result := range sink {
+        // Do something with the result
+        fmt.Println(result)
+    }
+    log.Println("Sink channel closed, finished processing results.")
+}()
+
+// Wait for the pipeline Run goroutine to finish
 wg.Wait()
+log.Println("Pipeline Run has completed.")
+
+// Note: The sink processing goroutine will finish automatically
+// because Run closes the sink channel upon completion or error.
 ```
 
 ## Advanced Usage
+
+### Observability
+
+Stream pipelines can be configured for observability using OpenTelemetry:
+
+-   `WithStreamTracerProvider`: Enables distributed tracing for the overall pipeline run and for individual stages wrapped by `StreamAdapter`.
+-   `WithStreamMetricsCollector`: Enables metrics collection for pipeline start/completion and default metrics (like items processed/skipped, concurrency) for stages wrapped by `StreamAdapter`.
+
+Note that custom `StreamStage` implementations added via `AddStreamStage` need to incorporate their own tracing and metrics reporting if desired.
 
 ### Handling Backpressure
 
@@ -164,7 +300,7 @@ All stream stages respect context cancellation for proper cleanup:
 ctx, cancel := context.WithCancel(context.Background())
 
 // Start the pipeline
-go fluxus.Run(ctx, pipeline, source, sink)
+go pipeline.Run(ctx, source, sink)
 
 // Cancel the pipeline gracefully (e.g., after timeout)
 time.AfterFunc(30*time.Second, func() {
@@ -296,7 +432,7 @@ func main() {
     b2 := fluxus.AddStage(builder, tokenizeStage)
     b3 := fluxus.AddStage(b2, countStage)
     
-    pipeline, err := fluxus.Finalize(b3)
+    pipeline, err := fluxus.Finalize[string, int](b3)
     if err != nil {
         log.Fatalf("Failed to build pipeline: %v", err)
     }
@@ -314,7 +450,9 @@ func main() {
     wg.Add(1)
     go func() {
         defer wg.Done()
-        if err := fluxus.Run(ctx, pipeline, source, sink); err != nil {
+        // pipeline is *fluxus.StreamPipeline[string, int]
+        // source is chan string, sink is chan int
+        if err := pipeline.Run(ctx, source, sink); err != nil {
             log.Printf("Pipeline error: %v", err)
         }
     }()

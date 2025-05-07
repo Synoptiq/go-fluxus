@@ -171,13 +171,22 @@ func TestCircuitBreakerPipeline(t *testing.T) {
 			pipeline := fluxus.NewPipeline(circuitBreaker)
 			ctx := context.Background()
 
+			// --- FIX: Start the pipeline ---
+			err := pipeline.Start(ctx)
+			require.NoError(t, err, "Pipeline should start without error")
+			// --- FIX: Ensure pipeline is stopped ---
+			defer func() {
+				stopErr := pipeline.Stop(ctx)
+				assert.NoError(t, stopErr, "Pipeline should stop without error")
+			}()
+
 			var results []string
 			var errs []error
 
 			for i := 0; i < tc.callsToMake; i++ {
-				result, err := pipeline.Process(ctx, fmt.Sprintf("input-%d", i))
-				if err != nil {
-					errs = append(errs, err)
+				result, pipelineProcessErr := pipeline.Process(ctx, fmt.Sprintf("input-%d", i))
+				if pipelineProcessErr != nil {
+					errs = append(errs, pipelineProcessErr)
 				} else {
 					results = append(results, result)
 				}
