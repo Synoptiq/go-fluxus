@@ -2,6 +2,7 @@ package fluxus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -86,7 +87,7 @@ func BuildPipelineFromConfig(config *PipelineConfig, registry *Registry) (interf
 
 func buildClassicPipeline(config *PipelineConfig, registry *Registry) (*Pipeline[any, any], error) {
 	if len(config.Stages) == 0 {
-		return nil, fmt.Errorf("classic pipeline requires at least one stage")
+		return nil, errors.New("classic pipeline requires at least one stage")
 	}
 
 	var stages []interface{}
@@ -219,7 +220,11 @@ func DefaultRegistry() *Registry {
 	return defaultRegistry
 }
 
-func mapBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func mapBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	mapProps, ok := props.(*MapProperties)
 	if !ok {
 		return nil, fmt.Errorf("incorrect properties type for 'map': expected *MapProperties, got %T", props)
@@ -246,12 +251,12 @@ func mapBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) 
 
 	// Optionally, configure the error handler if provided in the properties.
 	if mapProps.ErrorHandler != "" {
-		errorHandlerFunc, ok := registry.GetExecutor(mapProps.ErrorHandler)
-		if !ok {
+		errorHandlerFunc, okErrHandler := registry.GetExecutor(mapProps.ErrorHandler)
+		if !okErrHandler {
 			return nil, fmt.Errorf("error handler executor '%s' not found in registry", mapProps.ErrorHandler)
 		}
 
-		if errorHandler, ok := errorHandlerFunc.(func(error) error); ok {
+		if errorHandler, okErrHandlerSig := errorHandlerFunc.(func(error) error); okErrHandlerSig {
 			mapStage = mapStage.WithErrorHandler(errorHandler)
 		} else {
 			return nil, fmt.Errorf("error handler executor '%s' is not a valid ErrorHandler", mapProps.ErrorHandler)
@@ -261,14 +266,18 @@ func mapBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) 
 	return mapStage, nil
 }
 
-func bufferBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
-	bufferProps, ok := props.(*BufferProperties)
-	if !ok {
+func bufferBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
+	bufferProps, okBuff := props.(*BufferProperties)
+	if !okBuff {
 		return nil, fmt.Errorf("incorrect properties type for 'buffer': expected *BufferProperties, got %T", props)
 	}
 
-	processorFunc, ok := registry.GetExecutor(bufferProps.Processor)
-	if !ok {
+	processorFunc, okProcFnc := registry.GetExecutor(bufferProps.Processor)
+	if !okProcFnc {
 		return nil, fmt.Errorf("processor '%s' not found in registry", bufferProps.Processor)
 	}
 
@@ -279,19 +288,19 @@ func bufferBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfi
 
 	var bufferStage *Buffer[any, any]
 
-	if processor, ok := processorFunc.(func(ctx context.Context, batch []any) ([]any, error)); ok {
+	if processor, okProcFncSig := processorFunc.(func(ctx context.Context, batch []any) ([]any, error)); okProcFncSig {
 		bufferStage = NewBuffer(batchSize, processor)
 	} else {
 		return nil, fmt.Errorf("processor '%s' is not a valid function for Buffer stage", bufferProps.Processor)
 	}
 
 	if bufferProps.ErrorHandler != "" {
-		errorHandlerFunc, ok := registry.GetExecutor(bufferProps.ErrorHandler)
-		if !ok {
+		errorHandlerFunc, okErrHandler := registry.GetExecutor(bufferProps.ErrorHandler)
+		if !okErrHandler {
 			return nil, fmt.Errorf("error handler executor '%s' not found in registry", bufferProps.ErrorHandler)
 		}
 
-		if errorHandler, ok := errorHandlerFunc.(func(error) error); ok {
+		if errorHandler, okErrHandlerSig := errorHandlerFunc.(func(error) error); okErrHandlerSig {
 			bufferStage = bufferStage.WithErrorHandler(errorHandler)
 		} else {
 			return nil, fmt.Errorf("error handler executor '%s' is not a valid ErrorHandler", bufferProps.ErrorHandler)
@@ -301,7 +310,11 @@ func bufferBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfi
 	return bufferStage, nil
 }
 
-func fanoutBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func fanoutBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	nestedBuilder func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	fanoutProps, ok := props.(*FanOutProperties)
 	if !ok {
 		return nil, fmt.Errorf("incorrect properties type for 'fanout': expected *FanOutProperties, got %T", props)
@@ -320,23 +333,23 @@ func fanoutBuilder(props StageConfigurer, registry *Registry, nestedBuilder func
 			return nil, fmt.Errorf("failed to build nested stage #%d ('%s'): %w", i, stageConfig.Name, err)
 		}
 		// try casting to Stage[any, any]
-		if stage, ok := stage.(Stage[any, any]); !ok {
+		var pipelineStage Stage[any, any]
+		if pipelineStage, ok = stage.(Stage[any, any]); !ok {
 			return nil, fmt.Errorf("nested stage #%d ('%s') is not a valid Stage[any, any]", i, stageConfig.Name)
-		} else {
-			stages = append(stages, stage)
 		}
+		stages = append(stages, pipelineStage)
 	}
 
 	var fanoutStage = NewFanOut(stages...).
 		WithConcurrency(fanoutConcurrency)
 
 	if fanoutProps.ErrorHandler != "" {
-		errorHandlerFunc, ok := registry.GetExecutor(fanoutProps.ErrorHandler)
-		if !ok {
+		errorHandlerFunc, okErrHandler := registry.GetExecutor(fanoutProps.ErrorHandler)
+		if !okErrHandler {
 			return nil, fmt.Errorf("error handler executor '%s' not found in registry", fanoutProps.ErrorHandler)
 		}
 
-		if errorHandler, ok := errorHandlerFunc.(func(error) error); ok {
+		if errorHandler, okErrHandlerSig := errorHandlerFunc.(func(error) error); okErrHandlerSig {
 			fanoutStage = fanoutStage.WithErrorHandler(errorHandler)
 		} else {
 			return nil, fmt.Errorf("error handler executor '%s' is not a valid ErrorHandler", fanoutProps.ErrorHandler)
@@ -346,7 +359,11 @@ func fanoutBuilder(props StageConfigurer, registry *Registry, nestedBuilder func
 	return fanoutStage, nil
 }
 
-func faninBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func faninBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	faninProps, ok := props.(*FanInProperties)
 	if !ok {
 		return nil, fmt.Errorf("incorrect properties type for 'fanin': expected *FanInProperties, got %T", props)
@@ -358,20 +375,21 @@ func faninBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(
 	}
 
 	var faninStage *FanIn[any, any]
+	var aggregator func(inputs []any) (any, error)
 
-	if aggregator, ok := faninAggregatorFunc.(func(inputs []any) (any, error)); !ok {
+	if aggregator, ok = faninAggregatorFunc.(func(inputs []any) (any, error)); !ok {
 		return nil, fmt.Errorf("aggregator '%s' is not a valid function for FanIn stage", faninProps.Aggregator)
-	} else {
-		faninStage = NewFanIn(aggregator)
 	}
 
+	faninStage = NewFanIn(aggregator)
+
 	if faninProps.ErrorHandler != "" {
-		errorHandlerFunc, ok := registry.GetExecutor(faninProps.ErrorHandler)
-		if !ok {
+		errorHandlerFunc, okErrHandler := registry.GetExecutor(faninProps.ErrorHandler)
+		if !okErrHandler {
 			return nil, fmt.Errorf("error handler executor '%s' not found in registry", faninProps.ErrorHandler)
 		}
 
-		if errorHandler, ok := errorHandlerFunc.(func(error) error); ok {
+		if errorHandler, okErrHandlerSig := errorHandlerFunc.(func(error) error); okErrHandlerSig {
 			faninStage = faninStage.WithErrorHandler(errorHandler)
 		} else {
 			return nil, fmt.Errorf("error handler executor '%s' is not a valid ErrorHandler", faninProps.ErrorHandler)
@@ -381,10 +399,17 @@ func faninBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(
 	return faninStage, nil
 }
 
-func mapReduceBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func mapReduceBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	mapReduceProps, ok := props.(*MapReduceProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'map_reduce': expected *MapReduceProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'map_reduce': expected *MapReduceProperties, got %T",
+			props,
+		)
 	}
 
 	mapperFunc, ok := registry.GetExecutor(mapReduceProps.MapperFunction)
@@ -399,15 +424,20 @@ func mapReduceBuilder(props StageConfigurer, registry *Registry, _ func(*StageCo
 
 	var mapreduceStage *MapReduce[any, any, any, any]
 
-	if mapper, ok := mapperFunc.(func(ctx context.Context, item any) (KeyValue[any, any], error)); !ok {
+	var mapper func(ctx context.Context, item any) (KeyValue[any, any], error)
+	if mapper, ok = mapperFunc.(func(ctx context.Context, item any) (KeyValue[any, any], error)); !ok {
 		return nil, fmt.Errorf("mapper '%s' is not a valid function for MapReduce stage", mapReduceProps.MapperFunction)
-	} else {
-		if reducer, ok := reducerFunc.(func(ctx context.Context, input ReduceInput[any, any]) (any, error)); !ok {
-			return nil, fmt.Errorf("reducer '%s' is not a valid function for MapReduce stage", mapReduceProps.ReducerFunction)
-		} else {
-			mapreduceStage = NewMapReduce(mapper, reducer)
-		}
 	}
+
+	var reducer func(ctx context.Context, input ReduceInput[any, any]) (any, error)
+	if reducer, ok = reducerFunc.(func(ctx context.Context, input ReduceInput[any, any]) (any, error)); !ok {
+		return nil, fmt.Errorf(
+			"reducer '%s' is not a valid function for MapReduce stage",
+			mapReduceProps.ReducerFunction,
+		)
+	}
+
+	mapreduceStage = NewMapReduce(mapper, reducer)
 
 	parallelism := mapReduceProps.Parallelism
 	if parallelism <= 0 {
@@ -419,7 +449,11 @@ func mapReduceBuilder(props StageConfigurer, registry *Registry, _ func(*StageCo
 	return mapreduceStage, nil
 }
 
-func filterBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func filterBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	filterProps, ok := props.(*FilterProperties)
 	if !ok {
 		return nil, fmt.Errorf("incorrect properties type for 'filter': expected *FilterProperties, got %T", props)
@@ -431,20 +465,24 @@ func filterBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfi
 	}
 
 	var filterStage *Filter[any]
+	var predicate func(ctx context.Context, item any) (bool, error)
 
-	if predicate, ok := predicateFunc.(PredicateFunc[any]); !ok {
-		return nil, fmt.Errorf("predicate '%s' is not a valid PredicateFunc for Filter stage", filterProps.FilterFunction)
-	} else {
-		filterStage = NewFilter(predicate)
+	if predicate, ok = predicateFunc.(PredicateFunc[any]); !ok {
+		return nil, fmt.Errorf(
+			"predicate '%s' is not a valid PredicateFunc for Filter stage",
+			filterProps.FilterFunction,
+		)
 	}
 
+	filterStage = NewFilter(predicate)
+
 	if filterProps.ErrorHandler != "" {
-		errorHandlerFunc, ok := registry.GetExecutor(filterProps.ErrorHandler)
-		if !ok {
+		errorHandlerFunc, okErrHandler := registry.GetExecutor(filterProps.ErrorHandler)
+		if !okErrHandler {
 			return nil, fmt.Errorf("error handler executor '%s' not found in registry", filterProps.ErrorHandler)
 		}
 
-		if errorHandler, ok := errorHandlerFunc.(func(error) error); ok {
+		if errorHandler, okErrHandlerSig := errorHandlerFunc.(func(error) error); okErrHandlerSig {
 			filterStage = filterStage.WithErrorHandler(errorHandler)
 		} else {
 			return nil, fmt.Errorf("error handler executor '%s' is not a valid ErrorHandler", filterProps.ErrorHandler)
@@ -454,7 +492,11 @@ func filterBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfi
 	return filterStage, nil
 }
 
-func routerBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func routerBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	nestedBuilder func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	routerProps, ok := props.(*RouterProperties)
 	if !ok {
 		return nil, fmt.Errorf("incorrect properties type for 'router': expected *RouterProperties, got %T", props)
@@ -472,8 +514,8 @@ func routerBuilder(props StageConfigurer, registry *Registry, nestedBuilder func
 		if err != nil {
 			return nil, fmt.Errorf("failed to build route '%s': %w", routeName, err)
 		}
-		stage, ok := subStage.(Stage[any, any])
-		if !ok {
+		stage, okStageSig := subStage.(Stage[any, any])
+		if !okStageSig {
 			return nil, fmt.Errorf("route '%s' is not a valid Stage[any, any]", routeName)
 		}
 
@@ -484,12 +526,16 @@ func routerBuilder(props StageConfigurer, registry *Registry, nestedBuilder func
 	}
 
 	var routerStage *Router[any, any]
+	var selector func(ctx context.Context, item any) ([]int, error)
 
-	if selector, ok := selectorFunc.(func(ctx context.Context, item any) ([]int, error)); !ok {
-		return nil, fmt.Errorf("selector function '%s' is not a valid function for Router stage", routerProps.SelectorFunction)
-	} else {
-		routerStage = NewRouter(selector, routes...)
+	if selector, ok = selectorFunc.(func(ctx context.Context, item any) ([]int, error)); !ok {
+		return nil, fmt.Errorf(
+			"selector function '%s' is not a valid function for Router stage",
+			routerProps.SelectorFunction,
+		)
 	}
+
+	routerStage = NewRouter(selector, routes...)
 
 	routerConcurrency := routerProps.Concurrency
 	if routerConcurrency < 0 {
@@ -499,12 +545,12 @@ func routerBuilder(props StageConfigurer, registry *Registry, nestedBuilder func
 	routerStage = routerStage.WithConcurrency(routerConcurrency)
 
 	if routerProps.ErrorHandler != "" {
-		errorHandlerFunc, ok := registry.GetExecutor(routerProps.ErrorHandler)
-		if !ok {
+		errorHandlerFunc, okErrHandler := registry.GetExecutor(routerProps.ErrorHandler)
+		if !okErrHandler {
 			return nil, fmt.Errorf("error handler executor '%s' not found in registry", routerProps.ErrorHandler)
 		}
 
-		if errorHandler, ok := errorHandlerFunc.(func(error) error); ok {
+		if errorHandler, okErrHandlerSig := errorHandlerFunc.(func(error) error); okErrHandlerSig {
 			routerStage = routerStage.WithErrorHandler(errorHandler)
 		} else {
 			return nil, fmt.Errorf("error handler executor '%s' is not a valid ErrorHandler", routerProps.ErrorHandler)
@@ -514,10 +560,17 @@ func routerBuilder(props StageConfigurer, registry *Registry, nestedBuilder func
 	return routerStage, nil
 }
 
-func joinByKeyBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func joinByKeyBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	joinByKeyProps, ok := props.(*JoinByKeyProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'join_by_key': expected *JoinByKeyProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'join_by_key': expected *JoinByKeyProperties, got %T",
+			props,
+		)
 	}
 
 	keyFunction, ok := registry.GetExecutor(joinByKeyProps.KeyFunction)
@@ -526,20 +579,23 @@ func joinByKeyBuilder(props StageConfigurer, registry *Registry, _ func(*StageCo
 	}
 
 	var joinStage *JoinByKey[any, any]
+	var keyFunc func(ctx context.Context, item any) (any, error)
 
-	if keyFunc, ok := keyFunction.(func(ctx context.Context, item any) (any, error)); !ok {
-		return nil, fmt.Errorf("key function '%s' is not a valid function for JoinByKey stage", joinByKeyProps.KeyFunction)
-	} else {
-		joinStage = NewJoinByKey(keyFunc)
+	if keyFunc, ok = keyFunction.(func(ctx context.Context, item any) (any, error)); !ok {
+		return nil, fmt.Errorf(
+			"key function '%s' is not a valid function for JoinByKey stage",
+			joinByKeyProps.KeyFunction,
+		)
 	}
+	joinStage = NewJoinByKey(keyFunc)
 
 	if joinByKeyProps.ErrorHandler != "" {
-		errorHandlerFunc, ok := registry.GetExecutor(joinByKeyProps.ErrorHandler)
-		if !ok {
+		errorHandlerFunc, okErrHandler := registry.GetExecutor(joinByKeyProps.ErrorHandler)
+		if !okErrHandler {
 			return nil, fmt.Errorf("error handler executor '%s' not found in registry", joinByKeyProps.ErrorHandler)
 		}
 
-		if errorHandler, ok := errorHandlerFunc.(func(error) error); ok {
+		if errorHandler, okErrHandlerSig := errorHandlerFunc.(func(error) error); okErrHandlerSig {
 			joinStage = joinStage.WithErrorHandler(errorHandler)
 		} else {
 			return nil, fmt.Errorf("error handler executor '%s' is not a valid ErrorHandler", joinByKeyProps.ErrorHandler)
@@ -549,10 +605,17 @@ func joinByKeyBuilder(props StageConfigurer, registry *Registry, _ func(*StageCo
 	return joinStage, nil
 }
 
-func tumblingCountWindowBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func tumblingCountWindowBuilder(
+	props StageConfigurer,
+	_ *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	tumblingCountWindowProps, ok := props.(*TumblingCountWindowProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'tumbling_count_window': expected *TumblingCountWindowProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'tumbling_count_window': expected *TumblingCountWindowProperties, got %T",
+			props,
+		)
 	}
 
 	windowSize := tumblingCountWindowProps.Size
@@ -565,10 +628,17 @@ func tumblingCountWindowBuilder(props StageConfigurer, registry *Registry, _ fun
 	return tumblingStage, nil
 }
 
-func tumblingTimeWindowBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func tumblingTimeWindowBuilder(
+	props StageConfigurer,
+	_ *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	tumblingTimeWindowProps, ok := props.(*TumblingTimeWindowProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'tumbling_time_window': expected *TumblingTimeWindowProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'tumbling_time_window': expected *TumblingTimeWindowProperties, got %T",
+			props,
+		)
 	}
 
 	windowDuration := tumblingTimeWindowProps.Duration
@@ -581,10 +651,17 @@ func tumblingTimeWindowBuilder(props StageConfigurer, registry *Registry, _ func
 	return tumblingStage, nil
 }
 
-func slidingCountWindowBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func slidingCountWindowBuilder(
+	props StageConfigurer,
+	_ *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	slidingCountWindowProps, ok := props.(*SlidingCountWindowProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'sliding_count_window': expected *SlidingCountWindowProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'sliding_count_window': expected *SlidingCountWindowProperties, got %T",
+			props,
+		)
 	}
 
 	windowSize := slidingCountWindowProps.Size
@@ -601,10 +678,17 @@ func slidingCountWindowBuilder(props StageConfigurer, registry *Registry, _ func
 	return slidingStage, nil
 }
 
-func slidingTimeWindowBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func slidingTimeWindowBuilder(
+	props StageConfigurer,
+	_ *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	slidingTimeWindowProps, ok := props.(*SlidingTimeWindowProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'sliding_time_window': expected *SlidingTimeWindowProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'sliding_time_window': expected *SlidingTimeWindowProperties, got %T",
+			props,
+		)
 	}
 
 	windowDuration := slidingTimeWindowProps.Duration
@@ -617,14 +701,24 @@ func slidingTimeWindowBuilder(props StageConfigurer, registry *Registry, _ func(
 		return nil, fmt.Errorf("invalid window slide for sliding time window stage: %d", windowSlideDuration)
 	}
 
-	slidingStage := NewSlidingTimeWindow[any](time.Duration(windowDuration)*time.Millisecond, time.Duration(windowSlideDuration)*time.Millisecond)
+	slidingStage := NewSlidingTimeWindow[any](
+		time.Duration(windowDuration)*time.Millisecond,
+		time.Duration(windowSlideDuration)*time.Millisecond,
+	)
 	return slidingStage, nil
 }
 
-func circuitBreakerBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func circuitBreakerBuilder(
+	props StageConfigurer,
+	_ *Registry,
+	nestedBuilder func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	circuitBreakerProps, ok := props.(*CircuitBreakerProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'circuit_breaker': expected *CircuitBreakerProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'circuit_breaker': expected *CircuitBreakerProperties, got %T",
+			props,
+		)
 	}
 
 	// parse the nested stage configuration
@@ -635,7 +729,7 @@ func circuitBreakerBuilder(props StageConfigurer, registry *Registry, nestedBuil
 
 	nestedBreakerStage, ok := nestedStage.(Stage[any, any])
 	if !ok {
-		return nil, fmt.Errorf("nested stage for circuit breaker is not a valid Stage[any, any]")
+		return nil, errors.New("nested stage for circuit breaker is not a valid Stage[any, any]")
 	}
 
 	failureThreshold := circuitBreakerProps.FailureThreshold
@@ -678,7 +772,11 @@ func circuitBreakerBuilder(props StageConfigurer, registry *Registry, nestedBuil
 	return circuitBreakerStage, nil
 }
 
-func retryBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func retryBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	nestedBuilder func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	retryProps, ok := props.(*RetryProperties)
 	if !ok {
 		return nil, fmt.Errorf("incorrect properties type for 'retry': expected *RetryProperties, got %T", props)
@@ -696,19 +794,20 @@ func retryBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(
 
 	var retryStage *Retry[any, any]
 
-	if nested, ok := nestedStage.(Stage[any, any]); !ok {
-		return nil, fmt.Errorf("nested stage for retry is not a valid Stage[any, any]")
-	} else {
-		retryStage = NewRetry(nested, maxAttempts)
+	var nested Stage[any, any]
+	if nested, ok = nestedStage.(Stage[any, any]); !ok {
+		return nil, errors.New("nested stage for retry is not a valid Stage[any, any]")
 	}
 
+	retryStage = NewRetry(nested, maxAttempts)
+
 	if retryProps.Backoff != "" {
-		backoffFunc, ok := registry.GetExecutor(retryProps.Backoff)
-		if !ok {
+		backoffFunc, okBackoffFunc := registry.GetExecutor(retryProps.Backoff)
+		if !okBackoffFunc {
 			return nil, fmt.Errorf("backoff function '%s' not found in registry", retryProps.Backoff)
 		}
 
-		if backoff, ok := backoffFunc.(func(attempt int) int); ok {
+		if backoff, okBackoffSig := backoffFunc.(func(attempt int) int); okBackoffSig {
 			retryStage = retryStage.WithBackoff(backoff)
 		} else {
 			return nil, fmt.Errorf("backoff function '%s' is not a valid function for Retry stage", retryProps.Backoff)
@@ -716,12 +815,12 @@ func retryBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(
 	}
 
 	if retryProps.ShouldRetry != "" {
-		shouldRetryFunc, ok := registry.GetExecutor(retryProps.ShouldRetry)
-		if !ok {
+		shouldRetryFunc, okRetryFunc := registry.GetExecutor(retryProps.ShouldRetry)
+		if !okRetryFunc {
 			return nil, fmt.Errorf("should retry function '%s' not found in registry", retryProps.ShouldRetry)
 		}
 
-		if shouldRetry, ok := shouldRetryFunc.(func(error) bool); ok {
+		if shouldRetry, okRetryFuncSig := shouldRetryFunc.(func(error) bool); okRetryFuncSig {
 			retryStage = retryStage.WithShouldRetry(shouldRetry)
 		} else {
 			return nil, fmt.Errorf("should retry function '%s' is not a valid function for Retry stage", retryProps.ShouldRetry)
@@ -729,12 +828,12 @@ func retryBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(
 	}
 
 	if retryProps.ErrorHandler != "" {
-		errorHandlerFunc, ok := registry.GetExecutor(retryProps.ErrorHandler)
-		if !ok {
+		errorHandlerFunc, okErrHandler := registry.GetExecutor(retryProps.ErrorHandler)
+		if !okErrHandler {
 			return nil, fmt.Errorf("error handler executor '%s' not found in registry", retryProps.ErrorHandler)
 		}
 
-		if errorHandler, ok := errorHandlerFunc.(func(error) error); ok {
+		if errorHandler, okErrHandlerSig := errorHandlerFunc.(func(error) error); okErrHandlerSig {
 			retryStage = retryStage.WithErrorHandler(errorHandler)
 		} else {
 			return nil, fmt.Errorf("error handler executor '%s' is not a valid ErrorHandler", retryProps.ErrorHandler)
@@ -744,7 +843,11 @@ func retryBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(
 	return retryStage, nil
 }
 
-func timeoutBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func timeoutBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	nestedBuilder func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	timeoutProps, ok := props.(*TimeoutProperties)
 	if !ok {
 		return nil, fmt.Errorf("incorrect properties type for 'timeout': expected *TimeoutProperties, got %T", props)
@@ -761,19 +864,22 @@ func timeoutBuilder(props StageConfigurer, registry *Registry, nestedBuilder fun
 	}
 
 	var timeoutStage *Timeout[any, any]
-	if nested, ok := nestedStage.(Stage[any, any]); !ok {
-		return nil, fmt.Errorf("nested stage for timeout is not a valid Stage[any, any]")
-	} else {
-		timeoutStage = NewTimeout(nested, time.Duration(timeoutDuration)*time.Millisecond)
+	var nested Stage[any, any]
+	var okStageSig bool
+
+	if nested, okStageSig = nestedStage.(Stage[any, any]); !okStageSig {
+		return nil, errors.New("nested stage for timeout is not a valid Stage[any, any]")
 	}
 
+	timeoutStage = NewTimeout(nested, time.Duration(timeoutDuration)*time.Millisecond)
+
 	if timeoutProps.ErrorHandler != "" {
-		errorHandlerFunc, ok := registry.GetExecutor(timeoutProps.ErrorHandler)
-		if !ok {
+		errorHandlerFunc, okErrHandler := registry.GetExecutor(timeoutProps.ErrorHandler)
+		if !okErrHandler {
 			return nil, fmt.Errorf("error handler executor '%s' not found in registry", timeoutProps.ErrorHandler)
 		}
 
-		if errorHandler, ok := errorHandlerFunc.(func(error) error); ok {
+		if errorHandler, okErrHandlerSig := errorHandlerFunc.(func(error) error); okErrHandlerSig {
 			timeoutStage = timeoutStage.WithErrorHandler(errorHandler)
 		} else {
 			return nil, fmt.Errorf("error handler executor '%s' is not a valid ErrorHandler", timeoutProps.ErrorHandler)
@@ -783,10 +889,17 @@ func timeoutBuilder(props StageConfigurer, registry *Registry, nestedBuilder fun
 	return timeoutStage, nil
 }
 
-func deadLetterQueueBuilder(props StageConfigurer, registry *Registry, nestedBuilder func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func deadLetterQueueBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	nestedBuilder func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	deadLetterQueueProps, ok := props.(*DeadLetterQueueProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'dead_letter_queue': expected *DeadLetterQueueProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'dead_letter_queue': expected *DeadLetterQueueProperties, got %T",
+			props,
+		)
 	}
 
 	nestedStage, err := nestedBuilder(&deadLetterQueueProps.Stage)
@@ -798,12 +911,12 @@ func deadLetterQueueBuilder(props StageConfigurer, registry *Registry, nestedBui
 	var deadLetterOptions []DeadLetterQueueOption[any, any]
 
 	if deadLetterQueueProps.ErrorLogger != "" {
-		errorLoggerFunc, ok := registry.GetExecutor(deadLetterQueueProps.ErrorLogger)
-		if !ok {
+		errorLoggerFunc, okErrLog := registry.GetExecutor(deadLetterQueueProps.ErrorLogger)
+		if !okErrLog {
 			return nil, fmt.Errorf("error logger executor '%s' not found in registry", deadLetterQueueProps.ErrorLogger)
 		}
 
-		if errorLogger, ok := errorLoggerFunc.(func(error)); ok {
+		if errorLogger, okErrorLogSig := errorLoggerFunc.(func(error)); okErrorLogSig {
 			deadLetterOptions = append(deadLetterOptions, WithDLQErrorLogger[any, any](errorLogger))
 		} else {
 			return nil, fmt.Errorf("error logger executor '%s' is not a valid ErrorLogger", deadLetterQueueProps.ErrorLogger)
@@ -811,12 +924,12 @@ func deadLetterQueueBuilder(props StageConfigurer, registry *Registry, nestedBui
 	}
 
 	if deadLetterQueueProps.Handler != "" {
-		handlerFunc, ok := registry.GetExecutor(deadLetterQueueProps.Handler)
-		if !ok {
+		handlerFunc, okHandlerFunc := registry.GetExecutor(deadLetterQueueProps.Handler)
+		if !okHandlerFunc {
 			return nil, fmt.Errorf("handler executor '%s' not found in registry", deadLetterQueueProps.Handler)
 		}
 
-		if handler, ok := handlerFunc.(DLQHandler[any]); ok {
+		if handler, okHandlerFuncSig := handlerFunc.(DLQHandler[any]); okHandlerFuncSig {
 			deadLetterOptions = append(deadLetterOptions, WithDLQHandler[any, any](handler))
 		} else {
 			return nil, fmt.Errorf("handler executor '%s' is not a valid function for DeadLetterQueue stage", deadLetterQueueProps.Handler)
@@ -824,35 +937,44 @@ func deadLetterQueueBuilder(props StageConfigurer, registry *Registry, nestedBui
 	}
 
 	if deadLetterQueueProps.ShouldDQLFunction != "" {
-		shouldDLQFunc, ok := registry.GetExecutor(deadLetterQueueProps.ShouldDQLFunction)
-		if !ok {
-			return nil, fmt.Errorf("should DLQ function '%s' not found in registry", deadLetterQueueProps.ShouldDQLFunction)
+		shouldDLQFunc, okDQLFunc := registry.GetExecutor(deadLetterQueueProps.ShouldDQLFunction)
+		if !okDQLFunc {
+			return nil, fmt.Errorf(
+				"should DLQ function '%s' not found in registry",
+				deadLetterQueueProps.ShouldDQLFunction,
+			)
 		}
 
-		if shouldDLQ, ok := shouldDLQFunc.(func(error) bool); ok {
+		if shouldDLQ, okSholdDQL := shouldDLQFunc.(func(error) bool); okSholdDQL {
 			deadLetterOptions = append(deadLetterOptions, WithShouldDLQ[any, any](shouldDLQ))
 		} else {
 			return nil, fmt.Errorf("should DLQ function '%s' is not a valid function for DeadLetterQueue stage", deadLetterQueueProps.ShouldDQLFunction)
 		}
 	}
 
-	if nested, ok := nestedStage.(Stage[any, any]); !ok {
-		return nil, fmt.Errorf("nested stage for dead letter queue is not a valid Stage[any, any]")
-	} else {
-		deadLetterQueueStage = NewDeadLetterQueue(nested, deadLetterOptions...)
+	var nested Stage[any, any]
+
+	if nested, ok = nestedStage.(Stage[any, any]); !ok {
+		return nil, errors.New("nested stage for dead letter queue is not a valid Stage[any, any]")
 	}
+
+	deadLetterQueueStage = NewDeadLetterQueue(nested, deadLetterOptions...)
 
 	return deadLetterQueueStage, nil
 }
 
-func customBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfig) (interface{}, error)) (interface{}, error) {
+func customBuilder(
+	props StageConfigurer,
+	registry *Registry,
+	_ func(*StageConfig) (interface{}, error),
+) (interface{}, error) {
 	customProps, ok := props.(*CustomProperties)
 	if !ok {
 		return nil, fmt.Errorf("incorrect properties type for 'custom': expected *CustomProperties, got %T", props)
 	}
 
 	if customProps.Factory == "" {
-		return nil, fmt.Errorf("custom stage properties must specify a factory name")
+		return nil, errors.New("custom stage properties must specify a factory name")
 	}
 
 	// The contract for a custom stage is that the user registers a factory function
@@ -865,7 +987,11 @@ func customBuilder(props StageConfigurer, registry *Registry, _ func(*StageConfi
 	// The registered executor must be of type func(config map[string]any) (Stage[any, any], error)
 	stageFactory, ok := factoryFunc.(func(config map[string]any) (Stage[any, any], error))
 	if !ok {
-		return nil, fmt.Errorf("registered factory for '%s' is not a valid custom stage factory. Expected func(map[string]any) (Stage[any, any], error), got %T", customProps.Factory, factoryFunc)
+		return nil, fmt.Errorf(
+			"registered factory for '%s' is not a valid custom stage factory. Expected func(map[string]any) (Stage[any, any], error), got %T",
+			customProps.Factory,
+			factoryFunc,
+		)
 	}
 
 	// Call the factory with the provided config map.

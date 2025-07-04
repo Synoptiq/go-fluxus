@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	// DefaultPipelineVersion is the default version of the pipeline configuration.
+	// PipelineVersion is the default version of the pipeline configuration.
 	PipelineVersion = "1.0.0"
 )
 
@@ -18,8 +18,6 @@ const (
 	PipelineTypeClassic PipelineType = "classic"
 	// PipelineTypeStreaming represents a streaming pipeline type.
 	PipelineTypeStreaming PipelineType = "streaming"
-	// PipelineTypeUnknown represents an unknown pipeline type.
-	PipelineTypeUnknown PipelineType = "unknown"
 )
 
 // PipelineDebugConfig holds the configuration for debugging a pipeline.
@@ -41,13 +39,13 @@ type PipelineStreamingConfig struct {
 // PipelineConfig holds the parsed configuration for a single pipeline.
 type PipelineConfig struct {
 	// General properties
-	Version string `yaml:"version" validate:"required"` // Version of the pipeline configuration
+	Version string `yaml:"version"           validate:"required"` // Version of the pipeline configuration
 	// These properties are common to all pipelines, regardless of their type.
-	Name    string                `yaml:"pipeline_name" validate:"required"`                         // Name of the pipeline
-	Type    PipelineType          `yaml:"pipeline_type" validate:"required,oneof=classic streaming"` // Type of the pipeline (classic or streaming)
-	Tracing PipelineTracingConfig `yaml:"tracing,omitempty"`                                         // Tracing configuration for the pipeline
-	Metrics PipelineMetricsConfig `yaml:"metrics,omitempty"`                                         // Metrics configuration for the pipeline
-	Stages  []StageConfig         `yaml:"stages" validate:"required,min=1"`                          // List of stages in the pipeline
+	Name    string                `yaml:"pipeline_name"     validate:"required"`                         // Name of the pipeline
+	Type    PipelineType          `yaml:"pipeline_type"     validate:"required,oneof=classic streaming"` // Type of the pipeline (classic or streaming)
+	Tracing PipelineTracingConfig `yaml:"tracing,omitempty"`                                             // Tracing configuration for the pipeline
+	Metrics PipelineMetricsConfig `yaml:"metrics,omitempty"`                                             // Metrics configuration for the pipeline
+	Stages  []StageConfig         `yaml:"stages"            validate:"required,min=1"`                   // List of stages in the pipeline
 
 	// Streaming properties
 	Streaming PipelineStreamingConfig `yaml:"streaming,omitempty"` // Streaming configuration for the pipeline, used
@@ -189,8 +187,8 @@ type StageConfigurer interface {
 
 // StageConfig holds the configuration for a single stage in a pipeline.
 type StageConfig struct {
-	Name       string          `yaml:"name" validate:"required"`       // Name of the stage
-	Type       StageType       `yaml:"type" validate:"required"`       // Type of the stage (e.g , "map", "buffer", "fan_out", etc.)
+	Name       string          `yaml:"name"       validate:"required"` // Name of the stage
+	Type       StageType       `yaml:"type"       validate:"required"` // Type of the stage (e.g , "map", "buffer", "fan_out", etc.)
 	Properties StageConfigurer `yaml:"properties" validate:"required"` // Stage-specific properties, unmarshaled based on Type
 }
 
@@ -222,7 +220,7 @@ func (sc *StageConfig) validateNestedStages(validate *validator.Validate) error 
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface for StageConfig.
-func (s *StageConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (sc *StageConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	// umarshal based on the type field
 	var stageType struct {
 		Name string    `yaml:"name"`
@@ -233,8 +231,8 @@ func (s *StageConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return err
 	}
 
-	s.Name = stageType.Name
-	s.Type = stageType.Type
+	sc.Name = stageType.Name
+	sc.Type = stageType.Type
 
 	var props StageConfigurer
 	switch stageType.Type {
@@ -273,7 +271,7 @@ func (s *StageConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	case StageTypeCustom:
 		props = &CustomProperties{}
 	default:
-		return fmt.Errorf("unsupported stage type '%s' for stage '%s'", s.Type, s.Name)
+		return fmt.Errorf("unsupported stage type '%s' for stage '%s'", sc.Type, sc.Name)
 	}
 
 	// 3. Unmarshal the 'properties' field into the specific struct.
@@ -284,19 +282,19 @@ func (s *StageConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	propsWrapper.Properties = props // Point to our typed struct
 
 	if err := unmarshal(&propsWrapper); err != nil {
-		return fmt.Errorf("failed to unmarshal properties for stage '%s' (type %s): %w", s.Name, s.Type, err)
+		return fmt.Errorf("failed to unmarshal properties for stage '%s' (type %s): %w", sc.Name, sc.Type, err)
 	}
 
-	s.Properties = props
+	sc.Properties = props
 	return nil
 }
 
 // MapProperties holds the configuration for a map stage in a pipeline.
 type MapProperties struct {
-	MapFunction   Executor `yaml:"map_function" validate:"required"` // Map function to be called for each item
-	Concurrency   int      `yaml:"concurrency,omitempty"`            // Number of concurrent workers for the map
-	CollectErrors bool     `yaml:"collect_errors,omitempty"`         // Whether to collect errors in the map stage
-	ErrorHandler  Executor `yaml:"error_handler,omitempty"`          // Error handler function to be called in case of errors
+	MapFunction   Executor `yaml:"map_function"             validate:"required"` // Map function to be called for each item
+	Concurrency   int      `yaml:"concurrency,omitempty"`                        // Number of concurrent workers for the map
+	CollectErrors bool     `yaml:"collect_errors,omitempty"`                     // Whether to collect errors in the map stage
+	ErrorHandler  Executor `yaml:"error_handler,omitempty"`                      // Error handler function to be called in case of errors
 }
 
 // IsStageConfigurer is a marker method to make MapProperties implement StageConfigurer interface.
@@ -304,9 +302,9 @@ func (m *MapProperties) IsStageConfigurer() {}
 
 // BufferProperties holds the configuration for a buffer stage in a pipeline.
 type BufferProperties struct {
-	BatchSize    int      `yaml:"batch_size" validate:"gt=0"`    // Size of the buffer batch
-	Processor    Executor `yaml:"processor" validate:"required"` // Processor function to be called for each batch
-	ErrorHandler Executor `yaml:"error_handler,omitempty"`       // Error handler function to be called in case of errors
+	BatchSize    int      `yaml:"batch_size"              validate:"gt=0"`     // Size of the buffer batch
+	Processor    Executor `yaml:"processor"               validate:"required"` // Processor function to be called for each batch
+	ErrorHandler Executor `yaml:"error_handler,omitempty"`                     // Error handler function to be called in case of errors
 }
 
 // IsStageConfigurer is a marker method to make BufferProperties implement StageConfigurer interface.
@@ -314,9 +312,9 @@ func (b *BufferProperties) IsStageConfigurer() {}
 
 // FanOutProperties holds the configuration for a fan-out stage in a pipeline.
 type FanOutProperties struct {
-	Stages       []StageConfig `yaml:"stages" validate:"required,min=1"` // List of stages to fan out to
-	Concurrency  int           `yaml:"concurrency,omitempty"`            // Number of concurrent workers for the fan-out
-	ErrorHandler Executor      `yaml:"error_handler,omitempty"`          // Error handler function to be called in case of errors
+	Stages       []StageConfig `yaml:"stages"                  validate:"required,min=1"` // List of stages to fan out to
+	Concurrency  int           `yaml:"concurrency,omitempty"`                             // Number of concurrent workers for the fan-out
+	ErrorHandler Executor      `yaml:"error_handler,omitempty"`                           // Error handler function to be called in case of errors
 }
 
 // IsStageConfigurer is a marker method to make FanOutProperties implement StageConfigurer interface.
@@ -324,8 +322,8 @@ func (f *FanOutProperties) IsStageConfigurer() {}
 
 // FanInProperties holds the configuration for a fan-in stage in a pipeline.
 type FanInProperties struct {
-	Aggregator   Executor `yaml:"aggregator" validate:"required"` // Aggregator function to be called for each item
-	ErrorHandler Executor `yaml:"error_handler,omitempty"`        // Error handler function to be called in case of errors
+	Aggregator   Executor `yaml:"aggregator"              validate:"required"` // Aggregator function to be called for each item
+	ErrorHandler Executor `yaml:"error_handler,omitempty"`                     // Error handler function to be called in case of errors
 }
 
 // IsStageConfigurer is a marker method to make FanInProperties implement StageConfigurer interface.
@@ -333,9 +331,9 @@ func (f *FanInProperties) IsStageConfigurer() {}
 
 // MapReduceProperties holds the configuration for a map-reduce stage in a pipeline.
 type MapReduceProperties struct {
-	MapperFunction  Executor `yaml:"mapper_function" validate:"required"`  // Mapper function to be called for each item
-	ReducerFunction Executor `yaml:"reducer_function" validate:"required"` // Reducer function to be called for each item
-	Parallelism     int      `yaml:"parallelism,omitempty"`                // Number of concurrent workers for the map-reduce
+	MapperFunction  Executor `yaml:"mapper_function"       validate:"required"` // Mapper function to be called for each item
+	ReducerFunction Executor `yaml:"reducer_function"      validate:"required"` // Reducer function to be called for each item
+	Parallelism     int      `yaml:"parallelism,omitempty"`                     // Number of concurrent workers for the map-reduce
 }
 
 // IsStageConfigurer is a marker method to make MapReduceProperties implement StageConfigurer interface.
@@ -343,8 +341,8 @@ func (m *MapReduceProperties) IsStageConfigurer() {}
 
 // FilterProperties holds the configuration for a filter stage in a pipeline.
 type FilterProperties struct {
-	FilterFunction Executor `yaml:"filter_function" validate:"required"` // Filter function to be called for each item
-	ErrorHandler   Executor `yaml:"error_handler,omitempty"`             // Error handler function to be called in case of errors
+	FilterFunction Executor `yaml:"filter_function"         validate:"required"` // Filter function to be called for each item
+	ErrorHandler   Executor `yaml:"error_handler,omitempty"`                     // Error handler function to be called in case of errors
 }
 
 // IsStageConfigurer is a marker method to make FilterProperties implement StageConfigurer interface.
@@ -352,10 +350,10 @@ func (f *FilterProperties) IsStageConfigurer() {}
 
 // RouterProperties holds the configuration for a router stage in a pipeline.
 type RouterProperties struct {
-	Routes           map[string]StageConfig `yaml:"routes" validate:"required,min=1"`      // Map of routes to stages
-	SelectorFunction Executor               `yaml:"selector_function" validate:"required"` // Selector function to determine the route for each item
-	ErrorHandler     Executor               `yaml:"error_handler,omitempty"`               // Error handler function to be called in case of errors
-	Concurrency      int                    `yaml:"concurrency,omitempty"`                 // Number of concurrent workers for the router
+	Routes           map[string]StageConfig `yaml:"routes"                  validate:"required,min=1"` // Map of routes to stages
+	SelectorFunction Executor               `yaml:"selector_function"       validate:"required"`       // Selector function to determine the route for each item
+	ErrorHandler     Executor               `yaml:"error_handler,omitempty"`                           // Error handler function to be called in case of errors
+	Concurrency      int                    `yaml:"concurrency,omitempty"`                             // Number of concurrent workers for the router
 }
 
 // IsStageConfigurer is a marker method to make RouterProperties implement StageConfigurer interface.
@@ -363,8 +361,8 @@ func (r *RouterProperties) IsStageConfigurer() {}
 
 // JoinByKeyProperties holds the configuration for a join by key stage in a pipeline.
 type JoinByKeyProperties struct {
-	KeyFunction  Executor `yaml:"key_function" validate:"required"` // Key function to extract the key for joining
-	ErrorHandler Executor `yaml:"error_handler,omitempty"`          // Error handler function to be called in case of errors
+	KeyFunction  Executor `yaml:"key_function"            validate:"required"` // Key function to extract the key for joining
+	ErrorHandler Executor `yaml:"error_handler,omitempty"`                     // Error handler function to be called in case of errors
 }
 
 // IsStageConfigurer is a marker method to make JoinByKeyProperties implement StageConfigurer interface.
@@ -388,7 +386,7 @@ func (t *TumblingTimeWindowProperties) IsStageConfigurer() {}
 
 // SlidingCountWindowProperties holds the configuration for a sliding count window stage in a pipeline.
 type SlidingCountWindowProperties struct {
-	Size  int `yaml:"size" validate:"gt=0"`  // Size of the sliding count window
+	Size  int `yaml:"size"  validate:"gt=0"` // Size of the sliding count window
 	Slide int `yaml:"slide" validate:"gt=0"` // Slide interval of the sliding count window
 }
 
@@ -398,7 +396,7 @@ func (s *SlidingCountWindowProperties) IsStageConfigurer() {}
 // SlidingTimeWindowProperties holds the configuration for a sliding time window stage in a pipeline.
 type SlidingTimeWindowProperties struct {
 	Duration int `yaml:"duration" validate:"gt=0"` // Duration of the sliding time window in milliseconds
-	Slide    int `yaml:"slide" validate:"gt=0"`    // Slide interval of the sliding time window in milliseconds
+	Slide    int `yaml:"slide"    validate:"gt=0"` // Slide interval of the sliding time window in milliseconds
 }
 
 // IsStageConfigurer is a marker method to make SlidingTimeWindowProperties implement StageConfigurer interface.
@@ -406,11 +404,11 @@ func (s *SlidingTimeWindowProperties) IsStageConfigurer() {}
 
 // CircuitBreakerProperties holds the configuration for a circuit breaker stage in a pipeline.
 type CircuitBreakerProperties struct {
-	Stage            StageConfig `yaml:"stage" validate:"required"`         // The stage to wrap with a circuit breaker
-	FailureThreshold int         `yaml:"failure_threshold" validate:"gt=0"` // Number of failures before the circuit opens
-	ResetTimeout     int         `yaml:"reset_timeout" validate:"gt=0"`     // Time in milliseconds before the circuit resets
-	SuccessThreshold int         `yaml:"success_threshold,omitempty"`       // Number of successes before the circuit closes
-	HalfOpenMax      int         `yaml:"half_open_max,omitempty"`           // Maximum number of requests allowed in the half-open state
+	Stage            StageConfig `yaml:"stage"                       validate:"required"` // The stage to wrap with a circuit breaker
+	FailureThreshold int         `yaml:"failure_threshold"           validate:"gt=0"`     // Number of failures before the circuit opens
+	ResetTimeout     int         `yaml:"reset_timeout"               validate:"gt=0"`     // Time in milliseconds before the circuit resets
+	SuccessThreshold int         `yaml:"success_threshold,omitempty"`                     // Number of successes before the circuit closes
+	HalfOpenMax      int         `yaml:"half_open_max,omitempty"`                         // Maximum number of requests allowed in the half-open state
 }
 
 // IsStageConfigurer is a marker method to make CircuitBreakerProperties implement StageConfigurer interface.
@@ -418,11 +416,11 @@ func (c *CircuitBreakerProperties) IsStageConfigurer() {}
 
 // RetryProperties holds the configuration for a retry stage in a pipeline.
 type RetryProperties struct {
-	Stage        StageConfig `yaml:"stage" validate:"required"` // The stage to wrap with retry logic
-	Attempts     int         `yaml:"attempts" validate:"gt=0"`  // Number of retry attempts
-	ShouldRetry  Executor    `yaml:"should_retry,omitempty"`    // Function to determine if a retry should be attempted
-	Backoff      Executor    `yaml:"backoff,omitempty"`         // Backoff function to be called between retries
-	ErrorHandler Executor    `yaml:"error_handler,omitempty"`   // Error handler function to be called in case of errors
+	Stage        StageConfig `yaml:"stage"                   validate:"required"` // The stage to wrap with retry logic
+	Attempts     int         `yaml:"attempts"                validate:"gt=0"`     // Number of retry attempts
+	ShouldRetry  Executor    `yaml:"should_retry,omitempty"`                      // Function to determine if a retry should be attempted
+	Backoff      Executor    `yaml:"backoff,omitempty"`                           // Backoff function to be called between retries
+	ErrorHandler Executor    `yaml:"error_handler,omitempty"`                     // Error handler function to be called in case of errors
 }
 
 // IsStageConfigurer is a marker method to make RetryProperties implement StageConfigurer interface.
@@ -430,9 +428,9 @@ func (r *RetryProperties) IsStageConfigurer() {}
 
 // TimeoutProperties holds the configuration for a timeout stage in a pipeline.
 type TimeoutProperties struct {
-	Stage        StageConfig `yaml:"stage" validate:"required"` // The stage to wrap with a timeout
-	Timeout      int         `yaml:"timeout" validate:"gt=0"`   // Timeout duration in milliseconds
-	ErrorHandler Executor    `yaml:"error_handler,omitempty"`   // Error handler function to be called in case of errors
+	Stage        StageConfig `yaml:"stage"                   validate:"required"` // The stage to wrap with a timeout
+	Timeout      int         `yaml:"timeout"                 validate:"gt=0"`     // Timeout duration in milliseconds
+	ErrorHandler Executor    `yaml:"error_handler,omitempty"`                     // Error handler function to be called in case of errors
 }
 
 // IsStageConfigurer is a marker method to make TimeoutProperties implement StageConfigurer interface.
@@ -440,10 +438,10 @@ func (t *TimeoutProperties) IsStageConfigurer() {}
 
 // DeadLetterQueueProperties holds the configuration for a dead letter queue stage in a pipeline.
 type DeadLetterQueueProperties struct {
-	Stage             StageConfig `yaml:"stage" validate:"required"`     // The stage to wrap with a dead-letter queue
-	Handler           Executor    `yaml:"handler" validate:"required"`   // Handler function to be called for each item in the dead letter queue
-	ShouldDQLFunction Executor    `yaml:"should_dql_function,omitempty"` // Function to determine if an item should be sent to the dead letter queue
-	ErrorLogger       Executor    `yaml:"error_logger,omitempty"`        // Error logger function to be called in case of errors
+	Stage             StageConfig `yaml:"stage"                         validate:"required"` // The stage to wrap with a dead-letter queue
+	Handler           Executor    `yaml:"handler"                       validate:"required"` // Handler function to be called for each item in the dead letter queue
+	ShouldDQLFunction Executor    `yaml:"should_dql_function,omitempty"`                     // Function to determine if an item should be sent to the dead letter queue
+	ErrorLogger       Executor    `yaml:"error_logger,omitempty"`                            // Error logger function to be called in case of errors
 }
 
 // IsStageConfigurer is a marker method to make DeadLetterQueueProperties implement StageConfigurer interface.
@@ -451,8 +449,8 @@ func (d *DeadLetterQueueProperties) IsStageConfigurer() {}
 
 // CustomProperties holds the configuration for a custom stage in a pipeline.
 type CustomProperties struct {
-	Factory Executor       `yaml:"factory" validate:"required"` // The name of the registered factory function for this custom stage.
-	Config  map[string]any `yaml:"config,omitempty"`            // Custom configuration for the stage, passed to the factory.
+	Factory Executor       `yaml:"factory"          validate:"required"` // The name of the registered factory function for this custom stage.
+	Config  map[string]any `yaml:"config,omitempty"`                     // Custom configuration for the stage, passed to the factory.
 }
 
 // IsStageConfigurer is a marker method to make CustomProperties implement StageConfigurer interface.
