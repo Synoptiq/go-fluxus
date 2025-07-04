@@ -3,7 +3,7 @@ module github.com/synoptiq/go-fluxus
 go 1.23.4
 
 require (
-	github.com/go-playground/validator/v10 v10.26.0
+	github.com/go-playground/validator/v10 v10.27.0
 	github.com/mattn/go-sqlite3 v1.14.27
 	github.com/stretchr/testify v1.10.0
 	go.opentelemetry.io/otel v1.35.0
