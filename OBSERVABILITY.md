@@ -411,6 +411,94 @@ tracedPipeline := fluxus.NewTracedPipeline(
     ),
     // Optionally: fluxus.WithTracerPipelineProvider[Input, Output](customProvider),
 )
+
+// Traced Timeout
+tracedTimeout := fluxus.NewTracedTimeout(
+    timeout,
+    fluxus.WithTracerStageName[Input, Output]("timeout-stage"),
+    fluxus.WithTracerAttributes[Input, Output](
+        attribute.String("operation", "external-api-call"),
+    ),
+)
+
+// Traced CircuitBreaker
+tracedCircuitBreaker := fluxus.NewTracedCircuitBreaker(
+    circuitBreaker,
+    fluxus.WithTracerStageName[Input, Output]("circuit-breaker"),
+    fluxus.WithTracerAttributes[Input, Output](
+        attribute.String("service", "payment-gateway"),
+    ),
+)
+
+// Traced DeadLetterQueue
+tracedDLQ := fluxus.NewTracedDeadLetterQueue(
+    dlq,
+    fluxus.WithTracerStageName[Input, Output]("dead-letter-queue"),
+    fluxus.WithTracerAttributes[Input, Output](
+        attribute.String("dlq-target", "error-queue"),
+    ),
+)
+
+// Traced Router
+tracedRouter := fluxus.NewTracedRouter(
+    router,
+    fluxus.WithTracerStageName[Input, []Output]("conditional-router"),
+    fluxus.WithTracerAttributes[Input, []Output](
+        attribute.String("routing-strategy", "content-based"),
+    ),
+)
+
+// Traced Filter
+tracedFilter := fluxus.NewTracedFilter(
+    filter,
+    fluxus.WithTracerStageName[Input, Input]("data-filter"),
+    fluxus.WithTracerAttributes[Input, Input](
+        attribute.String("filter-type", "validation"),
+    ),
+)
+
+// Traced JoinByKey
+tracedJoin := fluxus.NewTracedJoinByKey(
+    joinStage,
+    fluxus.WithTracerStageName[[]Input, map[Key][]Input]("key-join"),
+    fluxus.WithTracerAttributes[[]Input, map[Key][]Input](
+        attribute.String("join-type", "inner"),
+    ),
+)
+
+// Traced Map and MapReduce
+tracedMap := fluxus.NewTracedMap(
+    mapStage,
+    fluxus.WithTracerStageName[[]Input, []Output]("parallel-map"),
+    fluxus.WithTracerAttributes[[]Input, []Output](
+        attribute.String("operation", "transform"),
+    ),
+)
+
+tracedMapReduce := fluxus.NewTracedMapReduce(
+    mapReduceStage,
+    fluxus.WithTracerStageName[[]Input, []Output]("distributed-computation"),
+    fluxus.WithTracerAttributes[[]Input, []Output](
+        attribute.String("computation", "aggregation"),
+    ),
+)
+
+// Traced Window stages
+tracedCountWindow := fluxus.NewTracedTumblingCountWindow(
+    countWindow,
+    fluxus.WithTracerStreamStageName[Input, []Input]("count-window"),
+    fluxus.WithTracerStreamAttributes[Input, []Input](
+        attribute.Int("window.size", 100),
+    ),
+)
+
+tracedTimeWindow := fluxus.NewTracedTumblingTimeWindow(
+    timeWindow,
+    fluxus.WithTracerStreamStageName[Input, []Input]("time-window"),
+    fluxus.WithTracerStreamAttributes[Input, []Input](
+        attribute.String("window.duration", "1m"),
+    ),
+)
 ```
 
 ### Custom Tracers
