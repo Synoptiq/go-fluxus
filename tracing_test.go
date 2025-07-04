@@ -683,9 +683,9 @@ func TestTracedTimeout(t *testing.T) {
 		)
 
 		// Process input (should timeout)
-		_, err := tracedTimeout2.Process(context.Background(), "hello")
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("Expected DeadlineExceeded error, got %v", err)
+		_, timeoutErr := tracedTimeout2.Process(context.Background(), "hello")
+		if !errors.Is(timeoutErr, context.DeadlineExceeded) {
+			t.Errorf("Expected DeadlineExceeded error, got %v", timeoutErr)
 		}
 
 		// Wait for spans
@@ -802,7 +802,7 @@ func TestTracedDeadLetterQueue(t *testing.T) {
 	// Create a DLQ handler that tracks calls
 	var dlqCalls []string
 	var mu sync.Mutex
-	dlqHandler := fluxus.DLQHandlerFunc[string](func(_ context.Context, item string, err error) error {
+	dlqHandler := fluxus.DLQHandlerFunc[string](func(_ context.Context, item string, _ error) error {
 		mu.Lock()
 		dlqCalls = append(dlqCalls, item)
 		mu.Unlock()
