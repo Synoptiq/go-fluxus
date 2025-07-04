@@ -571,6 +571,7 @@ func NewMetricatedMap[I, O any](
 	if mapStage == nil {
 		panic("fluxus.NewMetricatedMap: mapStage cannot be nil")
 	}
+
 	// Map stage doesn't have specific metrics in MetricsCollector beyond generic StageStarted/Completed/Error.
 	// So, we directly wrap it with NewMetricatedStage.
 	// Options provided to NewMetricatedMap will be passed to NewMetricatedStage.
@@ -723,4 +724,117 @@ func NewMetricatedSlidingTimeWindow[T any](
 	)
 
 	return NewMetricatedStreamStage(windowStage, allOptions...)
+}
+
+// NewMetricatedFilter creates a metricated wrapper around a Filter stage.
+func NewMetricatedFilter[T any](
+	filterStage *Filter[T],
+	options ...MetricatedStageOption[T, T],
+) Stage[T, T] {
+	if filterStage == nil {
+		panic("fluxus.NewMetricatedFilter: filterStage cannot be nil")
+	}
+
+	// Filter stage doesn't have specific metrics in MetricsCollector beyond generic StageStarted/Completed/Error.
+	// So, we directly wrap it with NewMetricatedStreamStage.
+	defaultOptions := []MetricatedStageOption[T, T]{
+		WithMetricsStageName[T, T]("metricated_filter"),
+	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(defaultOptions, options...)
+	return NewMetricatedStage(filterStage, allOptions...)
+}
+
+// NewMetricatedRouter creates a metricated wrapper around a Router stage.
+func NewMetricatedRouter[I, O any](
+	routerStage *Router[I, O],
+	options ...MetricatedStageOption[I, []O],
+) Stage[I, []O] {
+	if routerStage == nil {
+		panic("fluxus.NewMetricatedRouter: routerStage cannot be nil")
+	}
+	// Router stage doesn't have specific metrics in MetricsCollector beyond generic StageStarted/Completed/Error.
+	// So, we directly wrap it with NewMetricatedStage.
+	defaultOptions := []MetricatedStageOption[I, []O]{
+		WithMetricsStageName[I, []O]("metricated_router"),
+		WithMetricsCollector[I, []O](DefaultMetricsCollector),
+	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(defaultOptions, options...)
+	return NewMetricatedStage(routerStage, allOptions...)
+}
+
+// NewMetricatedJoinByKey creates a metricated wrapper around a JoinByKey stage.
+// Note: The signature assumes JoinByKey processes a slice of inputs, similar to MapReduce.
+func NewMetricatedJoinByKey[I any, K comparable](
+	joinStage *JoinByKey[I, K],
+	options ...MetricatedStageOption[[]I, map[K][]I],
+) Stage[[]I, map[K][]I] {
+	if joinStage == nil {
+		panic("fluxus.NewMetricatedJoinByKey: joinStage cannot be nil")
+	}
+	// JoinByKey stage doesn't have specific metrics in MetricsCollector.
+	defaultOptions := []MetricatedStageOption[[]I, map[K][]I]{
+		WithMetricsStageName[[]I, map[K][]I]("metricated_join_by_key"),
+	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(defaultOptions, options...)
+	return NewMetricatedStage(joinStage, allOptions...)
+}
+
+// NewMetricatedCircuitBreaker creates a metricated wrapper around a CircuitBreaker stage.
+func NewMetricatedCircuitBreaker[I, O any](
+	cbStage *CircuitBreaker[I, O],
+	options ...MetricatedStageOption[I, O],
+) Stage[I, O] {
+	if cbStage == nil {
+		panic("fluxus.NewMetricatedCircuitBreaker: cbStage cannot be nil")
+	}
+	// CircuitBreaker stage doesn't have specific metrics in MetricsCollector.
+	defaultOptions := []MetricatedStageOption[I, O]{
+		WithMetricsStageName[I, O]("metricated_circuit_breaker"),
+	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(defaultOptions, options...)
+	return NewMetricatedStage(cbStage, allOptions...)
+}
+
+// NewMetricatedTimeout creates a metricated wrapper around a Timeout stage.
+func NewMetricatedTimeout[I, O any](
+	timeoutStage *Timeout[I, O],
+	options ...MetricatedStageOption[I, O],
+) Stage[I, O] {
+	if timeoutStage == nil {
+		panic("fluxus.NewMetricatedTimeout: timeoutStage cannot be nil")
+	}
+	// Timeout stage doesn't have specific metrics in MetricsCollector.
+	defaultOptions := []MetricatedStageOption[I, O]{
+		WithMetricsStageName[I, O]("metricated_timeout"),
+	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(defaultOptions, options...)
+	return NewMetricatedStage(timeoutStage, allOptions...)
+}
+
+// NewMetricatedDeadLetterQueue creates a metricated wrapper around a DeadLetterQueue stage.
+func NewMetricatedDeadLetterQueue[I, O any](
+	dlqStage *DeadLetterQueue[I, O],
+	options ...MetricatedStageOption[I, O],
+) Stage[I, O] {
+	if dlqStage == nil {
+		panic("fluxus.NewMetricatedDeadLetterQueue: dlqStage cannot be nil")
+	}
+	// DeadLetterQueue stage doesn't have specific metrics in MetricsCollector.
+	defaultOptions := []MetricatedStageOption[I, O]{
+		WithMetricsStageName[I, O]("metricated_dead_letter_queue"),
+	}
+
+	//nolint:gocritic // this is for clarity, not a linting issue
+	allOptions := append(defaultOptions, options...)
+	return NewMetricatedStage(dlqStage, allOptions...)
 }
