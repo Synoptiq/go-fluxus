@@ -84,6 +84,7 @@ func main() {
 Fluxus includes extensive documentation to help you get started and make the most of its features:
 
 - [Pipeline Documentation](PIPELINE.md) - Basic stage and pipeline concepts
+- [Configuration Documentation](CONFIG.md) - YAML-based pipeline configuration
 - [Stream Pipeline Documentation](STREAMPIPELINE.md) - Stream processing with backpressure
 - [Patterns Documentation](PATTERNS.md) - Fan-out/fan-in, MapReduce, etc.
 - [Building Stateful Stages](STATEFUL_STAGES.md) - Guidance and helpers for stateful components
