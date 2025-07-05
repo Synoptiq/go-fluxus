@@ -25,8 +25,7 @@ type MetricsCollector interface {
 
 	// RetryAttempt is called for each retry attempt within a Retry stage.
 	RetryAttempt(ctx context.Context, stageName string, attempt int, err error)
-	// BufferBatchProcessed is called when a batch is processed by a Buffer stage (if applicable).
-	// stageName is the name of the buffer stage.
+	// BufferBatchProcessed is called when a batch is processed by a Buffer stage.
 	BufferBatchProcessed(ctx context.Context, batchSize int, duration time.Duration)
 	// FanOutStarted is called when a FanOut stage begins processing.
 	FanOutStarted(ctx context.Context, stageName string, numBranches int)
@@ -40,10 +39,8 @@ type MetricsCollector interface {
 	// --- Stream Pipeline Lifecycle Metrics ---
 
 	// PipelineStarted is called when a StreamPipeline's Run method begins execution.
-	// (Could optionally be called by simple Pipeline.Process too).
-	PipelineStarted(ctx context.Context, pipelineName string) // Added
+	PipelineStarted(ctx context.Context, pipelineName string)
 	// PipelineCompleted is called when a StreamPipeline's Run method finishes.
-	// (Could optionally be called by simple Pipeline.Process too).
 	PipelineCompleted(ctx context.Context, pipelineName string, duration time.Duration, err error)
 
 	// --- Stream Worker Metrics (Specific to how stages run within StreamPipeline) ---
@@ -52,13 +49,94 @@ type MetricsCollector interface {
 	StageWorkerConcurrency(ctx context.Context, stageName string, concurrencyLevel int)
 	// StageWorkerItemProcessed reports successful processing of an item by a stream worker.
 	StageWorkerItemProcessed(ctx context.Context, stageName string, duration time.Duration)
-	// StageWorkerItemSkipped reports an item skipped due to an error with SkipOnError strategy within a stream worker.
+	// StageWorkerItemSkipped reports an item skipped due to an error with SkipOnError strategy.
 	StageWorkerItemSkipped(ctx context.Context, stageName string, err error)
-	// StageWorkerErrorSent reports an error sent to an error channel via SendToErrorChannel strategy from a stream worker.
+	// StageWorkerErrorSent reports an error sent to an error channel via SendToErrorChannel strategy.
 	StageWorkerErrorSent(ctx context.Context, stageName string, err error)
 
-    // --- Windowing Metrics ---
-    WindowEmitted(ctx context.Context, stageName string, itemCount int)
+	// --- Windowing Stage Metrics ---
+
+	// WindowEmitted is called when a windowing stage successfully emits a window.
+	WindowEmitted(ctx context.Context, stageName string, itemCountInWindow int)
+
+	// --- Timeout Stage Metrics ---
+
+	// TimeoutOccurred is called when a stage times out.
+	TimeoutOccurred(ctx context.Context, stageName string, configuredTimeout time.Duration, actualDuration time.Duration)
+
+	// --- Circuit Breaker Stage Metrics ---
+
+	// CircuitStateChanged is called when circuit breaker changes state.
+	CircuitStateChanged(ctx context.Context, stageName string, fromState, toState string)
+	// CircuitBreakerRejected is called when a request is rejected due to open circuit.
+	CircuitBreakerRejected(ctx context.Context, stageName string)
+	// CircuitBreakerFailureRecorded is called when a failure is recorded.
+	CircuitBreakerFailureRecorded(ctx context.Context, stageName string, failureCount int, threshold int)
+	// CircuitBreakerSuccessRecorded is called when success is recorded in half-open state.
+	CircuitBreakerSuccessRecorded(ctx context.Context, stageName string, successCount int, threshold int)
+
+	// --- Dead Letter Queue Stage Metrics ---
+
+	// DeadLetterQueueItemSent is called when an item is sent to DLQ.
+	DeadLetterQueueItemSent(ctx context.Context, stageName string, originalError error)
+	// DeadLetterQueueHandlerError is called when DLQ handler itself fails.
+	DeadLetterQueueHandlerError(ctx context.Context, stageName string, dlqError error)
+
+	// --- Router Stage Metrics ---
+
+	// RouterRoutesSelected is called after route selection.
+	RouterRoutesSelected(ctx context.Context, stageName string, numRoutesSelected int, totalRoutes int)
+	// RouterNoRouteMatched is called when no routes match.
+	RouterNoRouteMatched(ctx context.Context, stageName string)
+	// RouterRouteProcessed is called for each successfully processed route.
+	RouterRouteProcessed(ctx context.Context, stageName string, routeName string, routeIndex int, duration time.Duration)
+
+	// --- Map Stage Metrics ---
+
+	// MapItemProcessed is called for each successfully processed item in Map stage.
+	MapItemProcessed(ctx context.Context, stageName string, itemIndex int, duration time.Duration)
+	// MapItemError is called for each item that fails processing in Map stage.
+	MapItemError(ctx context.Context, stageName string, itemIndex int, err error)
+	// MapConcurrencyLevel reports the actual concurrency used for a Map operation.
+	MapConcurrencyLevel(ctx context.Context, stageName string, concurrencyLevel int, totalItems int)
+
+	// --- MapReduce Stage Metrics ---
+
+	// MapReduceMapPhaseCompleted is called when map phase completes.
+	MapReduceMapPhaseCompleted(ctx context.Context, stageName string, numItems int, numKeys int, duration time.Duration)
+	// MapReduceShufflePhaseCompleted is called when shuffle phase completes.
+	MapReduceShufflePhaseCompleted(ctx context.Context, stageName string, numKeys int, duration time.Duration)
+	// MapReduceReducePhaseCompleted is called when reduce phase completes.
+	MapReduceReducePhaseCompleted(ctx context.Context, stageName string, numKeys int, numResults int, duration time.Duration)
+	// MapReduceKeyGroupSize reports the size of value groups per key.
+	MapReduceKeyGroupSize(ctx context.Context, stageName string, key string, groupSize int)
+
+	// --- Filter Stage Metrics ---
+
+	// FilterItemPassed is called when an item passes the filter.
+	FilterItemPassed(ctx context.Context, stageName string)
+	// FilterItemDropped is called when an item is filtered out.
+	FilterItemDropped(ctx context.Context, stageName string)
+	// FilterPredicateError is called when the predicate function returns an error.
+	FilterPredicateError(ctx context.Context, stageName string, err error)
+
+	// --- JoinByKey Stage Metrics ---
+
+	// JoinByKeyGroupCreated is called for each unique key found.
+	JoinByKeyGroupCreated(ctx context.Context, stageName string, keyStr string, groupSize int)
+	// JoinByKeyCompleted is called when join operation completes.
+	JoinByKeyCompleted(ctx context.Context, stageName string, numKeys int, totalItems int, duration time.Duration)
+
+	// --- Custom Stage Metrics ---
+
+	// CustomStageMetric is a generic metric for custom stages.
+	// Custom stage implementations can call this method directly to report stage-specific metrics.
+	// Example: collector.CustomStageMetric(ctx, "my_custom_stage", "items_processed", 42)
+	CustomStageMetric(ctx context.Context, stageName string, metricName string, value interface{})
+	// CustomStageEvent is called for notable events in custom stages.
+	// Custom stage implementations can call this method to report significant events.
+	// Example: collector.CustomStageEvent(ctx, "my_custom_stage", "cache_miss", map[string]interface{}{"key": "user:123"})
+	CustomStageEvent(ctx context.Context, stageName string, eventName string, metadata map[string]interface{})
 }
 ```
 
@@ -111,6 +189,65 @@ metricatedBuffer := fluxus.NewMetricatedBuffer(
 metricatedRetry := fluxus.NewMetricatedRetry(
     retry,
     fluxus.WithMetricsStageName[Input, Output]("resilient-operation"),
+)
+
+// Metricated Timeout
+metricatedTimeout := fluxus.NewMetricatedTimeout(
+    timeout,
+    fluxus.WithMetricsStageName[Input, Output]("timeout-protected"),
+)
+
+// Metricated CircuitBreaker
+metricatedCircuitBreaker := fluxus.NewMetricatedCircuitBreaker(
+    circuitBreaker,
+    fluxus.WithMetricsStageName[Input, Output]("resilient-service"),
+)
+
+// Metricated DeadLetterQueue
+metricatedDLQ := fluxus.NewMetricatedDeadLetterQueue(
+    dlq,
+    fluxus.WithMetricsStageName[Input, Output]("error-handler"),
+)
+
+// Metricated Router
+metricatedRouter := fluxus.NewMetricatedRouter(
+    router,
+    fluxus.WithMetricsStageName[Input, []Output]("conditional-routing"),
+)
+
+// Metricated Map
+metricatedMap := fluxus.NewMetricatedMap(
+    mapStage,
+    fluxus.WithMetricsStageName[[]Input, []Output]("parallel-transform"),
+)
+
+// Metricated MapReduce
+metricatedMapReduce := fluxus.NewMetricatedMapReduce(
+    mapReduceStage,
+    fluxus.WithMetricsStageName[[]Input, []Output]("distributed-processing"),
+)
+
+// Metricated Filter
+metricatedFilter := fluxus.NewMetricatedFilter(
+    filter,
+    fluxus.WithMetricsStageName[Input, Input]("data-filter"),
+)
+
+// Metricated JoinByKey
+metricatedJoin := fluxus.NewMetricatedJoinByKey(
+    joinStage,
+    fluxus.WithMetricsStageName[[]Input, map[Key][]Input]("data-join"),
+)
+
+// Metricated Window stages
+metricatedCountWindow := fluxus.NewMetricatedTumblingCountWindow(
+    countWindow,
+    fluxus.WithMetricsStreamStageName[Input, []Input]("count-window"),
+)
+
+metricatedTimeWindow := fluxus.NewMetricatedTumblingTimeWindow(
+    timeWindow,
+    fluxus.WithMetricsStreamStageName[Input, []Input]("time-window"),
 )
 ```
 
@@ -273,6 +410,94 @@ tracedPipeline := fluxus.NewTracedPipeline(
         attribute.String("data-source", "sales-db"),
     ),
     // Optionally: fluxus.WithTracerPipelineProvider[Input, Output](customProvider),
+)
+
+// Traced Timeout
+tracedTimeout := fluxus.NewTracedTimeout(
+    timeout,
+    fluxus.WithTracerStageName[Input, Output]("timeout-stage"),
+    fluxus.WithTracerAttributes[Input, Output](
+        attribute.String("operation", "external-api-call"),
+    ),
+)
+
+// Traced CircuitBreaker
+tracedCircuitBreaker := fluxus.NewTracedCircuitBreaker(
+    circuitBreaker,
+    fluxus.WithTracerStageName[Input, Output]("circuit-breaker"),
+    fluxus.WithTracerAttributes[Input, Output](
+        attribute.String("service", "payment-gateway"),
+    ),
+)
+
+// Traced DeadLetterQueue
+tracedDLQ := fluxus.NewTracedDeadLetterQueue(
+    dlq,
+    fluxus.WithTracerStageName[Input, Output]("dead-letter-queue"),
+    fluxus.WithTracerAttributes[Input, Output](
+        attribute.String("dlq-target", "error-queue"),
+    ),
+)
+
+// Traced Router
+tracedRouter := fluxus.NewTracedRouter(
+    router,
+    fluxus.WithTracerStageName[Input, []Output]("conditional-router"),
+    fluxus.WithTracerAttributes[Input, []Output](
+        attribute.String("routing-strategy", "content-based"),
+    ),
+)
+
+// Traced Filter
+tracedFilter := fluxus.NewTracedFilter(
+    filter,
+    fluxus.WithTracerStageName[Input, Input]("data-filter"),
+    fluxus.WithTracerAttributes[Input, Input](
+        attribute.String("filter-type", "validation"),
+    ),
+)
+
+// Traced JoinByKey
+tracedJoin := fluxus.NewTracedJoinByKey(
+    joinStage,
+    fluxus.WithTracerStageName[[]Input, map[Key][]Input]("key-join"),
+    fluxus.WithTracerAttributes[[]Input, map[Key][]Input](
+        attribute.String("join-type", "inner"),
+    ),
+)
+
+// Traced Map and MapReduce
+tracedMap := fluxus.NewTracedMap(
+    mapStage,
+    fluxus.WithTracerStageName[[]Input, []Output]("parallel-map"),
+    fluxus.WithTracerAttributes[[]Input, []Output](
+        attribute.String("operation", "transform"),
+    ),
+)
+
+tracedMapReduce := fluxus.NewTracedMapReduce(
+    mapReduceStage,
+    fluxus.WithTracerStageName[[]Input, []Output]("distributed-computation"),
+    fluxus.WithTracerAttributes[[]Input, []Output](
+        attribute.String("computation", "aggregation"),
+    ),
+)
+
+// Traced Window stages
+tracedCountWindow := fluxus.NewTracedTumblingCountWindow(
+    countWindow,
+    fluxus.WithTracerStreamStageName[Input, []Input]("count-window"),
+    fluxus.WithTracerStreamAttributes[Input, []Input](
+        attribute.Int("window.size", 100),
+    ),
+)
+
+tracedTimeWindow := fluxus.NewTracedTumblingTimeWindow(
+    timeWindow,
+    fluxus.WithTracerStreamStageName[Input, []Input]("time-window"),
+    fluxus.WithTracerStreamAttributes[Input, []Input](
+        attribute.String("window.duration", "1m"),
+    ),
 )
 ```
 

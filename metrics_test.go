@@ -30,6 +30,32 @@ type mockMetricsCollector struct {
 	stageWorkerItemSkipped   int64 // Added
 	stageWorkerErrorSent     int64 // Added
 	windowEmitted            int64 // Added
+
+	// New stage-specific metrics
+	timeoutOccurred               int64
+	circuitStateChanged           int64
+	circuitBreakerRejected        int64
+	circuitBreakerFailureRecorded int64
+	circuitBreakerSuccessRecorded int64
+	dlqItemSent                   int64
+	dlqHandlerError               int64
+	routerRoutesSelected          int64
+	routerNoRouteMatched          int64
+	routerRouteProcessed          int64
+	mapItemProcessed              int64
+	mapItemError                  int64
+	mapConcurrencyLevel           int64
+	mapReduceMapPhase             int64
+	mapReduceShufflePhase         int64
+	mapReduceReducePhase          int64
+	mapReduceKeyGroupSize         int64
+	filterItemPassed              int64
+	filterItemDropped             int64
+	filterPredicateError          int64
+	joinByKeyGroupCreated         int64
+	joinByKeyCompleted            int64
+	customStageMetric             int64
+	customStageEvent              int64
 }
 
 func (m *mockMetricsCollector) PipelineStarted(_ context.Context, _ string) {
@@ -94,6 +120,109 @@ func (m *mockMetricsCollector) FanInCompleted(_ context.Context, _ string, _ int
 
 func (m *mockMetricsCollector) WindowEmitted(_ context.Context, _ string, _ int) {
 	atomic.AddInt64(&m.windowEmitted, 1)
+}
+
+// New stage-specific metric implementations
+func (m *mockMetricsCollector) TimeoutOccurred(_ context.Context, _ string, _ time.Duration, _ time.Duration) {
+	atomic.AddInt64(&m.timeoutOccurred, 1)
+}
+
+func (m *mockMetricsCollector) CircuitStateChanged(_ context.Context, _ string, _, _ string) {
+	atomic.AddInt64(&m.circuitStateChanged, 1)
+}
+
+func (m *mockMetricsCollector) CircuitBreakerRejected(_ context.Context, _ string) {
+	atomic.AddInt64(&m.circuitBreakerRejected, 1)
+}
+
+func (m *mockMetricsCollector) CircuitBreakerFailureRecorded(_ context.Context, _ string, _ int, _ int) {
+	atomic.AddInt64(&m.circuitBreakerFailureRecorded, 1)
+}
+
+func (m *mockMetricsCollector) CircuitBreakerSuccessRecorded(_ context.Context, _ string, _ int, _ int) {
+	atomic.AddInt64(&m.circuitBreakerSuccessRecorded, 1)
+}
+
+func (m *mockMetricsCollector) DeadLetterQueueItemSent(_ context.Context, _ string, _ error) {
+	atomic.AddInt64(&m.dlqItemSent, 1)
+}
+
+func (m *mockMetricsCollector) DeadLetterQueueHandlerError(_ context.Context, _ string, _ error) {
+	atomic.AddInt64(&m.dlqHandlerError, 1)
+}
+
+func (m *mockMetricsCollector) RouterRoutesSelected(_ context.Context, _ string, _ int, _ int) {
+	atomic.AddInt64(&m.routerRoutesSelected, 1)
+}
+
+func (m *mockMetricsCollector) RouterNoRouteMatched(_ context.Context, _ string) {
+	atomic.AddInt64(&m.routerNoRouteMatched, 1)
+}
+
+func (m *mockMetricsCollector) RouterRouteProcessed(_ context.Context, _ string, _ string, _ int, _ time.Duration) {
+	atomic.AddInt64(&m.routerRouteProcessed, 1)
+}
+
+func (m *mockMetricsCollector) MapItemProcessed(_ context.Context, _ string, _ int, _ time.Duration) {
+	atomic.AddInt64(&m.mapItemProcessed, 1)
+}
+
+func (m *mockMetricsCollector) MapItemError(_ context.Context, _ string, _ int, _ error) {
+	atomic.AddInt64(&m.mapItemError, 1)
+}
+
+func (m *mockMetricsCollector) MapConcurrencyLevel(_ context.Context, _ string, _ int, _ int) {
+	atomic.AddInt64(&m.mapConcurrencyLevel, 1)
+}
+
+func (m *mockMetricsCollector) MapReduceMapPhaseCompleted(_ context.Context, _ string, _ int, _ int, _ time.Duration) {
+	atomic.AddInt64(&m.mapReduceMapPhase, 1)
+}
+
+func (m *mockMetricsCollector) MapReduceShufflePhaseCompleted(_ context.Context, _ string, _ int, _ time.Duration) {
+	atomic.AddInt64(&m.mapReduceShufflePhase, 1)
+}
+
+func (m *mockMetricsCollector) MapReduceReducePhaseCompleted(
+	_ context.Context,
+	_ string,
+	_ int,
+	_ int,
+	_ time.Duration,
+) {
+	atomic.AddInt64(&m.mapReduceReducePhase, 1)
+}
+
+func (m *mockMetricsCollector) MapReduceKeyGroupSize(_ context.Context, _ string, _ string, _ int) {
+	atomic.AddInt64(&m.mapReduceKeyGroupSize, 1)
+}
+
+func (m *mockMetricsCollector) FilterItemPassed(_ context.Context, _ string) {
+	atomic.AddInt64(&m.filterItemPassed, 1)
+}
+
+func (m *mockMetricsCollector) FilterItemDropped(_ context.Context, _ string) {
+	atomic.AddInt64(&m.filterItemDropped, 1)
+}
+
+func (m *mockMetricsCollector) FilterPredicateError(_ context.Context, _ string, _ error) {
+	atomic.AddInt64(&m.filterPredicateError, 1)
+}
+
+func (m *mockMetricsCollector) JoinByKeyGroupCreated(_ context.Context, _ string, _ string, _ int) {
+	atomic.AddInt64(&m.joinByKeyGroupCreated, 1)
+}
+
+func (m *mockMetricsCollector) JoinByKeyCompleted(_ context.Context, _ string, _ int, _ int, _ time.Duration) {
+	atomic.AddInt64(&m.joinByKeyCompleted, 1)
+}
+
+func (m *mockMetricsCollector) CustomStageMetric(_ context.Context, _ string, _ string, _ interface{}) {
+	atomic.AddInt64(&m.customStageMetric, 1)
+}
+
+func (m *mockMetricsCollector) CustomStageEvent(_ context.Context, _ string, _ string, _ map[string]interface{}) {
+	atomic.AddInt64(&m.customStageEvent, 1)
 }
 
 // TestMetricatedStage tests the basic MetricatedStage functionality

@@ -132,6 +132,126 @@ func (m *InMemoryMetricsCollector) WindowEmitted(ctx context.Context, stageName 
 	fmt.Printf("  📊 Metric: Window[%s] emitted %d items\n", stageName, itemCount)
 }
 
+// TimeoutOccurred implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) TimeoutOccurred(ctx context.Context, stageName string, configuredTimeout time.Duration, actualDuration time.Duration) {
+	fmt.Printf("  📊 Metric: Timeout[%s] occurred - configured: %v, actual: %v\n", stageName, configuredTimeout, actualDuration)
+}
+
+// CircuitStateChanged implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) CircuitStateChanged(ctx context.Context, stageName string, fromState, toState string) {
+	fmt.Printf("  📊 Metric: CircuitBreaker[%s] state changed: %s -> %s\n", stageName, fromState, toState)
+}
+
+// CircuitBreakerRejected implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) CircuitBreakerRejected(ctx context.Context, stageName string) {
+	fmt.Printf("  📊 Metric: CircuitBreaker[%s] rejected request (open)\n", stageName)
+}
+
+// CircuitBreakerFailureRecorded implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) CircuitBreakerFailureRecorded(ctx context.Context, stageName string, failureCount int, threshold int) {
+	fmt.Printf("  📊 Metric: CircuitBreaker[%s] failure recorded: %d/%d\n", stageName, failureCount, threshold)
+}
+
+// CircuitBreakerSuccessRecorded implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) CircuitBreakerSuccessRecorded(ctx context.Context, stageName string, successCount int, threshold int) {
+	fmt.Printf("  📊 Metric: CircuitBreaker[%s] success recorded: %d/%d\n", stageName, successCount, threshold)
+}
+
+// DeadLetterQueueItemSent implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) DeadLetterQueueItemSent(ctx context.Context, stageName string, originalError error) {
+	fmt.Printf("  📊 Metric: DLQ[%s] item sent due to: %v\n", stageName, originalError)
+}
+
+// DeadLetterQueueHandlerError implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) DeadLetterQueueHandlerError(ctx context.Context, stageName string, dlqError error) {
+	fmt.Printf("  📊 Metric: DLQ[%s] handler error: %v\n", stageName, dlqError)
+}
+
+// RouterRoutesSelected implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) RouterRoutesSelected(ctx context.Context, stageName string, numRoutesSelected int, totalRoutes int) {
+	fmt.Printf("  📊 Metric: Router[%s] selected %d/%d routes\n", stageName, numRoutesSelected, totalRoutes)
+}
+
+// RouterNoRouteMatched implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) RouterNoRouteMatched(ctx context.Context, stageName string) {
+	fmt.Printf("  📊 Metric: Router[%s] no route matched\n", stageName)
+}
+
+// RouterRouteProcessed implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) RouterRouteProcessed(ctx context.Context, stageName string, routeName string, routeIndex int, duration time.Duration) {
+	fmt.Printf("  📊 Metric: Router[%s] route '%s' (#%d) processed in %v\n", stageName, routeName, routeIndex, duration)
+}
+
+// MapItemProcessed implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) MapItemProcessed(ctx context.Context, stageName string, itemIndex int, duration time.Duration) {
+	fmt.Printf("  📊 Metric: Map[%s] item #%d processed in %v\n", stageName, itemIndex, duration)
+}
+
+// MapItemError implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) MapItemError(ctx context.Context, stageName string, itemIndex int, err error) {
+	fmt.Printf("  📊 Metric: Map[%s] item #%d error: %v\n", stageName, itemIndex, err)
+}
+
+// MapConcurrencyLevel implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) MapConcurrencyLevel(ctx context.Context, stageName string, concurrencyLevel int, totalItems int) {
+	fmt.Printf("  📊 Metric: Map[%s] concurrency %d for %d items\n", stageName, concurrencyLevel, totalItems)
+}
+
+// MapReduceMapPhaseCompleted implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) MapReduceMapPhaseCompleted(ctx context.Context, stageName string, numItems int, numKeys int, duration time.Duration) {
+	fmt.Printf("  📊 Metric: MapReduce[%s] map phase: %d items -> %d keys in %v\n", stageName, numItems, numKeys, duration)
+}
+
+// MapReduceShufflePhaseCompleted implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) MapReduceShufflePhaseCompleted(ctx context.Context, stageName string, numKeys int, duration time.Duration) {
+	fmt.Printf("  📊 Metric: MapReduce[%s] shuffle phase: %d keys in %v\n", stageName, numKeys, duration)
+}
+
+// MapReduceReducePhaseCompleted implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) MapReduceReducePhaseCompleted(ctx context.Context, stageName string, numKeys int, numResults int, duration time.Duration) {
+	fmt.Printf("  📊 Metric: MapReduce[%s] reduce phase: %d keys -> %d results in %v\n", stageName, numKeys, numResults, duration)
+}
+
+// MapReduceKeyGroupSize implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) MapReduceKeyGroupSize(ctx context.Context, stageName string, key string, groupSize int) {
+	fmt.Printf("  📊 Metric: MapReduce[%s] key '%s' has %d values\n", stageName, key, groupSize)
+}
+
+// FilterItemPassed implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) FilterItemPassed(ctx context.Context, stageName string) {
+	fmt.Printf("  📊 Metric: Filter[%s] item passed\n", stageName)
+}
+
+// FilterItemDropped implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) FilterItemDropped(ctx context.Context, stageName string) {
+	fmt.Printf("  📊 Metric: Filter[%s] item dropped\n", stageName)
+}
+
+// FilterPredicateError implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) FilterPredicateError(ctx context.Context, stageName string, err error) {
+	fmt.Printf("  📊 Metric: Filter[%s] predicate error: %v\n", stageName, err)
+}
+
+// JoinByKeyGroupCreated implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) JoinByKeyGroupCreated(ctx context.Context, stageName string, keyStr string, groupSize int) {
+	fmt.Printf("  📊 Metric: JoinByKey[%s] group created for key '%s' with %d items\n", stageName, keyStr, groupSize)
+}
+
+// JoinByKeyCompleted implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) JoinByKeyCompleted(ctx context.Context, stageName string, numKeys int, totalItems int, duration time.Duration) {
+	fmt.Printf("  📊 Metric: JoinByKey[%s] completed: %d keys, %d items in %v\n", stageName, numKeys, totalItems, duration)
+}
+
+// CustomStageMetric implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) CustomStageMetric(ctx context.Context, stageName string, metricName string, value interface{}) {
+	fmt.Printf("  📊 Metric: Custom[%s] %s = %v\n", stageName, metricName, value)
+}
+
+// CustomStageEvent implements MetricsCollector interface.
+func (m *InMemoryMetricsCollector) CustomStageEvent(ctx context.Context, stageName string, eventName string, metadata map[string]interface{}) {
+	fmt.Printf("  📊 Metric: Custom[%s] event '%s' with metadata: %v\n", stageName, eventName, metadata)
+}
+
 // PrintStats displays the collected metrics.
 func (m *InMemoryMetricsCollector) PrintStats() {
 	fmt.Println("\n📈 Collected Metrics Summary:")

@@ -566,3 +566,38 @@ func (*noopMetricsCollector) StageWorkerItemProcessed(_ context.Context, _ strin
 func (*noopMetricsCollector) StageWorkerItemSkipped(_ context.Context, _ string, _ error)           {}
 func (*noopMetricsCollector) StageWorkerErrorSent(_ context.Context, _ string, _ error)             {}
 func (*noopMetricsCollector) WindowEmitted(_ context.Context, _ string, _ int)                      {}
+
+func (*noopMetricsCollector) TimeoutOccurred(_ context.Context, _ string, _ time.Duration, _ time.Duration) {
+}
+func (*noopMetricsCollector) CircuitStateChanged(_ context.Context, _ string, _, _ string) {}
+func (*noopMetricsCollector) CircuitBreakerRejected(_ context.Context, _ string)           {}
+func (*noopMetricsCollector) CircuitBreakerFailureRecorded(_ context.Context, _ string, _ int, _ int) {
+}
+func (*noopMetricsCollector) CircuitBreakerSuccessRecorded(_ context.Context, _ string, _ int, _ int) {
+}
+func (*noopMetricsCollector) DeadLetterQueueItemSent(_ context.Context, _ string, _ error)     {}
+func (*noopMetricsCollector) DeadLetterQueueHandlerError(_ context.Context, _ string, _ error) {}
+func (*noopMetricsCollector) RouterRoutesSelected(_ context.Context, _ string, _ int, _ int)   {}
+func (*noopMetricsCollector) RouterNoRouteMatched(_ context.Context, _ string)                 {}
+func (*noopMetricsCollector) RouterRouteProcessed(_ context.Context, _ string, _ string, _ int, _ time.Duration) {
+}
+func (*noopMetricsCollector) MapItemProcessed(_ context.Context, _ string, _ int, _ time.Duration) {}
+func (*noopMetricsCollector) MapItemError(_ context.Context, _ string, _ int, _ error)             {}
+func (*noopMetricsCollector) MapConcurrencyLevel(_ context.Context, _ string, _ int, _ int)        {}
+func (*noopMetricsCollector) MapReduceMapPhaseCompleted(_ context.Context, _ string, _ int, _ int, _ time.Duration) {
+}
+func (*noopMetricsCollector) MapReduceShufflePhaseCompleted(_ context.Context, _ string, _ int, _ time.Duration) {
+}
+func (*noopMetricsCollector) MapReduceReducePhaseCompleted(_ context.Context, _ string, _ int, _ int, _ time.Duration) {
+}
+func (*noopMetricsCollector) MapReduceKeyGroupSize(_ context.Context, _ string, _ string, _ int) {}
+func (*noopMetricsCollector) FilterItemPassed(_ context.Context, _ string)                       {}
+func (*noopMetricsCollector) FilterItemDropped(_ context.Context, _ string)                      {}
+func (*noopMetricsCollector) FilterPredicateError(_ context.Context, _ string, _ error)          {}
+func (*noopMetricsCollector) JoinByKeyGroupCreated(_ context.Context, _ string, _ string, _ int) {}
+func (*noopMetricsCollector) JoinByKeyCompleted(_ context.Context, _ string, _ int, _ int, _ time.Duration) {
+}
+func (*noopMetricsCollector) CustomStageMetric(_ context.Context, _ string, _ string, _ interface{}) {
+}
+func (*noopMetricsCollector) CustomStageEvent(_ context.Context, _ string, _ string, _ map[string]interface{}) {
+}
