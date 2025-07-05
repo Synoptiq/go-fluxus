@@ -9,12 +9,27 @@ import (
 	"time"
 )
 
+// Error messages
+const (
+	ErrStageBuilderExists = "stage builder already registered for type: %s"
+	ErrExecutorExists     = "executor with name '%s' is already registered"
+)
+
+// BuildContext holds the observability context that gets passed to stage builders.
+// This includes pipeline-level metrics collector and tracing provider that can be
+// used to wrap individual stages when they have metrics/tracing enabled.
+type BuildContext struct {
+	MetricsCollector MetricsCollector // Pipeline-level metrics collector, may be nil
+	TracerProvider   TracerProvider   // Pipeline-level tracer provider, may be nil
+}
+
 // StageBuilder is a function that constructs a stage from its configuration.
-// It receives the specific properties, the registry to look up executors,
-// and a recursive build function to construct any nested stages.
+// It receives the complete stage configuration, the registry to look up executors,
+// a recursive build function to construct any nested stages, and a build context
+// containing pipeline-level observability components.
 // The returned stage is an interface{} to accommodate different generic types,
 // but it's expected to be a Stage[any, any] when built from config.
-type StageBuilder func(props StageConfigurer, registry *Registry, buildNestedStage func(*StageConfig) (interface{}, error)) (interface{}, error)
+type StageBuilder func(stageConfig *StageConfig, registry *Registry, buildNestedStage func(*StageConfig) (interface{}, error), buildContext *BuildContext) (interface{}, error)
 
 // Registry holds registered factory functions for creating stages and user-defined executors.
 type Registry struct {
@@ -33,13 +48,15 @@ func NewRegistry() *Registry {
 
 // RegisterStageBuilder adds a new builder for a specific StageType.
 // This is typically used by the framework to register builders for built-in stages.
-func (r *Registry) RegisterStageBuilder(stageType StageType, builder StageBuilder) {
+// Returns an error if a builder is already registered for this type.
+func (r *Registry) RegisterStageBuilder(stageType StageType, builder StageBuilder) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.stageBuilders[stageType]; exists {
-		panic(fmt.Sprintf("stage builder already registered for type: %s", stageType))
+		return fmt.Errorf(ErrStageBuilderExists, stageType)
 	}
 	r.stageBuilders[stageType] = builder
+	return nil
 }
 
 // GetStageBuilder retrieves a builder function by its StageType.
@@ -51,13 +68,15 @@ func (r *Registry) GetStageBuilder(stageType StageType) (StageBuilder, bool) {
 }
 
 // RegisterExecutor allows users to register their custom functions (e.g., a StageFunc or PredicateFunc).
-func (r *Registry) RegisterExecutor(name Executor, function interface{}) {
+// Returns an error if an executor is already registered with this name.
+func (r *Registry) RegisterExecutor(name Executor, function interface{}) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.executors[name]; exists {
-		panic(fmt.Sprintf("executor with name '%s' is already registered", name))
+		return fmt.Errorf(ErrExecutorExists, name)
 	}
 	r.executors[name] = function
+	return nil
 }
 
 // GetExecutor retrieves a user-defined function by its name.
@@ -90,11 +109,17 @@ func buildClassicPipeline(config *PipelineConfig, registry *Registry) (*Pipeline
 		return nil, errors.New("classic pipeline requires at least one stage")
 	}
 
+	// Create BuildContext from pipeline configuration
+	buildContext, err := createBuildContext(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create build context: %w", err)
+	}
+
 	var stages []interface{}
 	for i, stageConfig := range config.Stages {
-		builtStage, err := buildStage(&stageConfig, registry)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build stage #%d ('%s'): %w", i, stageConfig.Name, err)
+		builtStage, errBuild := buildStage(&stageConfig, registry, buildContext)
+		if errBuild != nil {
+			return nil, fmt.Errorf("failed to build stage #%d ('%s'): %w", i, stageConfig.Name, errBuild)
 		}
 		stages = append(stages, builtStage)
 	}
@@ -130,15 +155,21 @@ func buildStreamPipeline(config *PipelineConfig, registry *Registry) (interface{
 		streamOpts = append(streamOpts, WithStreamLogger(logger))
 	}
 
+	// 1.5. Create BuildContext from pipeline configuration
+	buildContext, err := createBuildContext(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create build context: %w", err)
+	}
+
 	// 2. Start the builder. The pipeline will be dynamically typed as any -> any.
 	builder := NewStreamPipeline[any](streamOpts...)
 	var currentBuilder interface{} = builder
 
 	// 3. Iterate through stages and add them to the builder
 	for i, stageConfig := range config.Stages {
-		builtStage, err := buildStage(&stageConfig, registry)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build stage #%d ('%s'): %w", i, stageConfig.Name, err)
+		builtStage, errBuild := buildStage(&stageConfig, registry, buildContext)
+		if errBuild != nil {
+			return nil, fmt.Errorf("failed to build stage #%d ('%s'): %w", i, stageConfig.Name, errBuild)
 		}
 
 		switch stage := builtStage.(type) {
@@ -149,7 +180,40 @@ func buildStreamPipeline(config *PipelineConfig, registry *Registry) (interface{
 			}
 			currentBuilder = AddStage(b, stageConfig.Name, stage)
 
+		case Stage[[]any, map[any][]any]:
+			// JoinByKey
+			b, ok := currentBuilder.(*StreamPipelineBuilder[[]any])
+			if !ok {
+				return nil, fmt.Errorf("internal builder error: expected *StreamPipelineBuilder[[]any] before JoinByKey stage '%s', but got %T", stageConfig.Name, currentBuilder)
+			}
+			currentBuilder = AddStage(b, stageConfig.Name, stage)
+
+		case Stage[any, []any]:
+			// FanOut
+			b, ok := currentBuilder.(*StreamPipelineBuilder[any])
+			if !ok {
+				return nil, fmt.Errorf("internal builder error: expected *StreamPipelineBuilder[any] before FanOut stage '%s', but got %T", stageConfig.Name, currentBuilder)
+			}
+			currentBuilder = AddStage(b, stageConfig.Name, stage)
+
+		case Stage[[]any, any]:
+			// FanIn
+			b, ok := currentBuilder.(*StreamPipelineBuilder[[]any])
+			if !ok {
+				return nil, fmt.Errorf("internal builder error: expected *StreamPipelineBuilder[[]any] before FanIn stage '%s', but got %T", stageConfig.Name, currentBuilder)
+			}
+			currentBuilder = AddStage(b, stageConfig.Name, stage)
+
+		case Stage[[]any, []any]:
+			// Buffer, MapReduce
+			b, ok := currentBuilder.(*StreamPipelineBuilder[[]any])
+			if !ok {
+				return nil, fmt.Errorf("internal builder error: expected *StreamPipelineBuilder[[]any] before batch processing stage '%s', but got %T", stageConfig.Name, currentBuilder)
+			}
+			currentBuilder = AddStage(b, stageConfig.Name, stage)
+
 		case StreamStage[any, []any]:
+			// Window stages
 			b, ok := currentBuilder.(*StreamPipelineBuilder[any])
 			if !ok {
 				return nil, fmt.Errorf("internal builder error: expected *StreamPipelineBuilder[any] before windowing stage '%s', but got %T", stageConfig.Name, currentBuilder)
@@ -172,11 +236,11 @@ func buildStreamPipeline(config *PipelineConfig, registry *Registry) (interface{
 		return nil, fmt.Errorf("internal builder error: final pipeline builder has unexpected type %T", currentBuilder)
 	}
 
-	return Finalize[any, any](finalBuilder)
+	return Finalize[any](finalBuilder)
 }
 
 // buildStage is the recursive core builder for a single stage.
-func buildStage(stageConfig *StageConfig, registry *Registry) (interface{}, error) {
+func buildStage(stageConfig *StageConfig, registry *Registry, buildContext *BuildContext) (interface{}, error) {
 	builder, ok := registry.GetStageBuilder(stageConfig.Type)
 	if !ok {
 		return nil, fmt.Errorf("no builder registered for stage type '%s'", stageConfig.Type)
@@ -184,10 +248,282 @@ func buildStage(stageConfig *StageConfig, registry *Registry) (interface{}, erro
 
 	// The recursive call is passed as a closure to the builder function.
 	buildNested := func(nestedConfig *StageConfig) (interface{}, error) {
-		return buildStage(nestedConfig, registry)
+		return buildStage(nestedConfig, registry, buildContext)
 	}
 
-	return builder(stageConfig.Properties, registry, buildNested)
+	return builder(stageConfig, registry, buildNested, buildContext)
+}
+
+// createBuildContext creates a BuildContext from pipeline configuration.
+func createBuildContext(config *PipelineConfig) (*BuildContext, error) {
+	factory := NewObservabilityFactory()
+
+	// Create metrics collector
+	metricsCollector, err := factory.CreateMetricsCollector(config.Metrics)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create metrics collector: %w", err)
+	}
+
+	// Create tracer provider
+	tracerProvider, err := factory.CreateTracerProvider(config.Tracing, config.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tracer provider: %w", err)
+	}
+
+	return &BuildContext{
+		MetricsCollector: metricsCollector,
+		TracerProvider:   tracerProvider,
+	}, nil
+}
+
+// wrapStageWithObservability wraps a stage with pattern-specific metrics and/or tracing if enabled in the stage config.
+func wrapStageWithObservability(stage interface{}, stageConfig *StageConfig, buildContext *BuildContext) interface{} {
+	// Apply pattern-specific metrics wrapping if enabled
+	if stageConfig.Metrics && buildContext.MetricsCollector != nil {
+		stage = wrapWithPatternSpecificMetrics(stage, stageConfig.Type, buildContext.MetricsCollector)
+	}
+
+	// Apply pattern-specific tracing wrapping if enabled
+	if stageConfig.Tracing && buildContext.TracerProvider != nil {
+		stage = wrapWithPatternSpecificTracing(stage, stageConfig.Type, buildContext.TracerProvider)
+	}
+
+	return stage
+}
+
+// wrapWithPatternSpecificMetrics wraps a stage with the appropriate pattern-specific metrics wrapper.
+const (
+	observabilityTypeMetrics = "metrics"
+	observabilityTypeTracing = "tracing"
+)
+
+// wrapWithObservability provides a unified wrapper for both metrics and tracing
+func wrapWithObservability(
+	stage any,
+	stageType StageType,
+	wrapType string,
+	collector MetricsCollector,
+	provider TracerProvider,
+) any {
+	switch stageType {
+	case StageTypeMap:
+		return wrapMapStage(stage, wrapType, collector, provider)
+	case StageTypeBuffer:
+		return wrapBufferStage(stage, wrapType, collector, provider)
+	case StageTypeFanOut:
+		return wrapFanOutStage(stage, wrapType, collector, provider)
+	case StageTypeFanIn:
+		return wrapFanInStage(stage, wrapType, collector, provider)
+	case StageTypeMapReduce:
+		return wrapMapReduceStage(stage, wrapType, collector, provider)
+	case StageTypeFilter:
+		return wrapFilterStage(stage, wrapType, collector, provider)
+	case StageTypeRouter:
+		return wrapRouterStage(stage, wrapType, collector, provider)
+	case StageTypeJoinByKey:
+		return wrapJoinByKeyStage(stage, wrapType, collector, provider)
+	case StageTypeTumblingCountWindow:
+		return wrapTumblingCountWindowStage(stage, wrapType, collector, provider)
+	case StageTypeTumblingTimeWindow:
+		return wrapTumblingTimeWindowStage(stage, wrapType, collector, provider)
+	case StageTypeSlidingCountWindow:
+		return wrapSlidingCountWindowStage(stage, wrapType, collector, provider)
+	case StageTypeSlidingTimeWindow:
+		return wrapSlidingTimeWindowStage(stage, wrapType, collector, provider)
+	case StageTypeTimeout:
+		return wrapTimeoutStage(stage, wrapType, collector, provider)
+	case StageTypeCircuitBreaker:
+		return wrapCircuitBreakerStage(stage, wrapType, collector, provider)
+	case StageTypeRetry:
+		return wrapRetryStage(stage, wrapType, collector, provider)
+	case StageTypeDeadLetterQueue:
+		return wrapDeadLetterQueueStage(stage, wrapType, collector, provider)
+	case StageTypeCustom:
+		// Custom stages don't have built-in wrappers, return as-is
+		return stage
+	}
+	return stage
+}
+
+func wrapMapStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if mapStage, ok := stage.(*Map[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedMap(mapStage, WithMetricsCollector[[]any, []any](collector))
+		}
+		return NewTracedMap(mapStage, WithTracerProvider[[]any, []any](provider))
+	}
+	return stage
+}
+
+func wrapBufferStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if bufferStage, ok := stage.(*Buffer[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedBuffer(bufferStage, WithMetricsCollector[[]any, []any](collector))
+		}
+		return NewTracedBuffer(bufferStage, WithTracerProvider[[]any, []any](provider))
+	}
+	return stage
+}
+
+func wrapFanOutStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if fanOutStage, ok := stage.(*FanOut[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedFanOut(fanOutStage, WithMetricsCollector[any, []any](collector))
+		}
+		return NewTracedFanOut(fanOutStage, WithTracerProvider[any, []any](provider))
+	}
+	return stage
+}
+
+func wrapFanInStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if fanInStage, ok := stage.(*FanIn[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedFanIn(fanInStage, WithMetricsCollector[[]any, any](collector))
+		}
+		return NewTracedFanIn(fanInStage, WithTracerProvider[[]any, any](provider))
+	}
+	return stage
+}
+
+func wrapMapReduceStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if mapReduceStage, ok := stage.(*MapReduce[any, any, any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedMapReduce(mapReduceStage, WithMetricsCollector[[]any, []any](collector))
+		}
+		return NewTracedMapReduce(mapReduceStage, WithTracerProvider[[]any, []any](provider))
+	}
+	return stage
+}
+
+func wrapFilterStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if filterStage, ok := stage.(*Filter[any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedFilter(filterStage, WithMetricsCollector[any, any](collector))
+		}
+		return NewTracedFilter(filterStage, WithTracerProvider[any, any](provider))
+	}
+	return stage
+}
+
+func wrapRouterStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if routerStage, ok := stage.(*Router[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedRouter(routerStage, WithMetricsCollector[any, []any](collector))
+		}
+		return NewTracedRouter(routerStage, WithTracerProvider[any, []any](provider))
+	}
+	return stage
+}
+
+func wrapJoinByKeyStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if joinStage, ok := stage.(*JoinByKey[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedJoinByKey(joinStage, WithMetricsCollector[[]any, map[any][]any](collector))
+		}
+		return NewTracedJoinByKey(joinStage, WithTracerProvider[[]any, map[any][]any](provider))
+	}
+	return stage
+}
+
+func wrapTumblingCountWindowStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if tumblingCountStage, ok := stage.(*TumblingCountWindow[any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedTumblingCountWindow(
+				tumblingCountStage,
+				WithMetricsStreamCollector[any, []any](collector),
+			)
+		}
+		return NewTracedTumblingCountWindow(tumblingCountStage, WithTracerStreamProvider[any, []any](provider))
+	}
+	return stage
+}
+
+func wrapTumblingTimeWindowStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if tumblingTimeStage, ok := stage.(*TumblingTimeWindow[any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedTumblingTimeWindow(
+				tumblingTimeStage,
+				WithMetricsStreamCollector[any, []any](collector),
+			)
+		}
+		return NewTracedTumblingTimeWindow(tumblingTimeStage, WithTracerStreamProvider[any, []any](provider))
+	}
+	return stage
+}
+
+func wrapSlidingCountWindowStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if slidingCountStage, ok := stage.(*SlidingCountWindow[any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedSlidingCountWindow(
+				slidingCountStage,
+				WithMetricsStreamCollector[any, []any](collector),
+			)
+		}
+		return NewTracedSlidingCountWindow(slidingCountStage, WithTracerStreamProvider[any, []any](provider))
+	}
+	return stage
+}
+
+func wrapSlidingTimeWindowStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if slidingTimeStage, ok := stage.(*SlidingTimeWindow[any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedSlidingTimeWindow(
+				slidingTimeStage,
+				WithMetricsStreamCollector[any, []any](collector),
+			)
+		}
+		return NewTracedSlidingTimeWindow(slidingTimeStage, WithTracerStreamProvider[any, []any](provider))
+	}
+	return stage
+}
+
+func wrapTimeoutStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if timeoutStage, ok := stage.(*Timeout[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedTimeout(timeoutStage, WithMetricsCollector[any, any](collector))
+		}
+		return NewTracedTimeout(timeoutStage, WithTracerProvider[any, any](provider))
+	}
+	return stage
+}
+
+func wrapCircuitBreakerStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if cbStage, ok := stage.(*CircuitBreaker[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedCircuitBreaker(cbStage, WithMetricsCollector[any, any](collector))
+		}
+		return NewTracedCircuitBreaker(cbStage, WithTracerProvider[any, any](provider))
+	}
+	return stage
+}
+
+func wrapRetryStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if retryStage, ok := stage.(*Retry[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedRetry(retryStage, WithMetricsCollector[any, any](collector))
+		}
+		return NewTracedRetry(retryStage, WithTracerProvider[any, any](provider))
+	}
+	return stage
+}
+
+func wrapDeadLetterQueueStage(stage any, wrapType string, collector MetricsCollector, provider TracerProvider) any {
+	if dlqStage, ok := stage.(*DeadLetterQueue[any, any]); ok {
+		if wrapType == observabilityTypeMetrics {
+			return NewMetricatedDeadLetterQueue(dlqStage, WithMetricsCollector[any, any](collector))
+		}
+		return NewTracedDeadLetterQueue(dlqStage, WithTracerProvider[any, any](provider))
+	}
+	return stage
+}
+
+func wrapWithPatternSpecificMetrics(stage any, stageType StageType, collector MetricsCollector) any {
+	return wrapWithObservability(stage, stageType, observabilityTypeMetrics, collector, nil)
+}
+
+// wrapWithPatternSpecificTracing wraps a stage with the appropriate pattern-specific tracing wrapper.
+func wrapWithPatternSpecificTracing(stage any, stageType StageType, provider TracerProvider) any {
+	return wrapWithObservability(stage, stageType, observabilityTypeTracing, nil, provider)
 }
 
 // --- Built-in Stage Builders ---
@@ -199,35 +535,54 @@ var once sync.Once
 func DefaultRegistry() *Registry {
 	once.Do(func() {
 		defaultRegistry = NewRegistry()
-		defaultRegistry.RegisterStageBuilder(StageTypeMap, mapBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeBuffer, bufferBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeFanOut, fanoutBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeFanIn, faninBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeMapReduce, mapReduceBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeFilter, filterBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeRouter, routerBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeJoinByKey, joinByKeyBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeTumblingCountWindow, tumblingCountWindowBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeTumblingTimeWindow, tumblingTimeWindowBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeSlidingCountWindow, slidingCountWindowBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeSlidingTimeWindow, slidingTimeWindowBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeCircuitBreaker, circuitBreakerBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeRetry, retryBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeTimeout, timeoutBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeDeadLetterQueue, deadLetterQueueBuilder)
-		defaultRegistry.RegisterStageBuilder(StageTypeCustom, customBuilder)
+		
+		// Register all built-in stage builders
+		// Since these are built-in types that shouldn't conflict, any error indicates a programming error
+		builders := []struct {
+			stageType StageType
+			builder   StageBuilder
+		}{
+			{StageTypeMap, mapBuilder},
+			{StageTypeBuffer, bufferBuilder},
+			{StageTypeFanOut, fanoutBuilder},
+			{StageTypeFanIn, faninBuilder},
+			{StageTypeMapReduce, mapReduceBuilder},
+			{StageTypeFilter, filterBuilder},
+			{StageTypeRouter, routerBuilder},
+			{StageTypeJoinByKey, joinByKeyBuilder},
+			{StageTypeTumblingCountWindow, tumblingCountWindowBuilder},
+			{StageTypeTumblingTimeWindow, tumblingTimeWindowBuilder},
+			{StageTypeSlidingCountWindow, slidingCountWindowBuilder},
+			{StageTypeSlidingTimeWindow, slidingTimeWindowBuilder},
+			{StageTypeCircuitBreaker, circuitBreakerBuilder},
+			{StageTypeRetry, retryBuilder},
+			{StageTypeTimeout, timeoutBuilder},
+			{StageTypeDeadLetterQueue, deadLetterQueueBuilder},
+			{StageTypeCustom, customBuilder},
+		}
+		
+		for _, b := range builders {
+			if err := defaultRegistry.RegisterStageBuilder(b.stageType, b.builder); err != nil {
+				// This should never happen for built-in builders, so panic is appropriate
+				panic(fmt.Sprintf("Failed to register built-in stage builder for %s: %v", b.stageType, err))
+			}
+		}
 	})
 	return defaultRegistry
 }
 
 func mapBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	mapProps, ok := props.(*MapProperties)
+	mapProps, ok := stageConfig.Properties.(*MapProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'map': expected *MapProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'map': expected *MapProperties, got %T",
+			stageConfig.Properties,
+		)
 	}
 
 	executorFunc, ok := registry.GetExecutor(mapProps.MapFunction)
@@ -263,17 +618,23 @@ func mapBuilder(
 		}
 	}
 
-	return mapStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(mapStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func bufferBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	bufferProps, okBuff := props.(*BufferProperties)
+	bufferProps, okBuff := stageConfig.Properties.(*BufferProperties)
 	if !okBuff {
-		return nil, fmt.Errorf("incorrect properties type for 'buffer': expected *BufferProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'buffer': expected *BufferProperties, got %T",
+			stageConfig.Properties,
+		)
 	}
 
 	processorFunc, okProcFnc := registry.GetExecutor(bufferProps.Processor)
@@ -307,17 +668,23 @@ func bufferBuilder(
 		}
 	}
 
-	return bufferStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(bufferStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func fanoutBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	nestedBuilder func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	fanoutProps, ok := props.(*FanOutProperties)
+	fanoutProps, ok := stageConfig.Properties.(*FanOutProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'fanout': expected *FanOutProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'fanout': expected *FanOutProperties, got %T",
+			stageConfig.Properties,
+		)
 	}
 
 	fanoutConcurrency := fanoutProps.Concurrency
@@ -356,17 +723,23 @@ func fanoutBuilder(
 		}
 	}
 
-	return fanoutStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(fanoutStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func faninBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	faninProps, ok := props.(*FanInProperties)
+	faninProps, ok := stageConfig.Properties.(*FanInProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'fanin': expected *FanInProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'fanin': expected *FanInProperties, got %T",
+			stageConfig.Properties,
+		)
 	}
 
 	faninAggregatorFunc, ok := registry.GetExecutor(faninProps.Aggregator)
@@ -396,19 +769,22 @@ func faninBuilder(
 		}
 	}
 
-	return faninStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(faninStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func mapReduceBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	mapReduceProps, ok := props.(*MapReduceProperties)
+	mapReduceProps, ok := stageConfig.Properties.(*MapReduceProperties)
 	if !ok {
 		return nil, fmt.Errorf(
 			"incorrect properties type for 'map_reduce': expected *MapReduceProperties, got %T",
-			props,
+			stageConfig.Properties,
 		)
 	}
 
@@ -446,17 +822,23 @@ func mapReduceBuilder(
 
 	mapreduceStage = mapreduceStage.WithParallelism(parallelism)
 
-	return mapreduceStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(mapreduceStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func filterBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	filterProps, ok := props.(*FilterProperties)
+	filterProps, ok := stageConfig.Properties.(*FilterProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'filter': expected *FilterProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'filter': expected *FilterProperties, got %T",
+			stageConfig.Properties,
+		)
 	}
 
 	predicateFunc, ok := registry.GetExecutor(filterProps.FilterFunction)
@@ -489,17 +871,23 @@ func filterBuilder(
 		}
 	}
 
-	return filterStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(filterStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func routerBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	nestedBuilder func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	routerProps, ok := props.(*RouterProperties)
+	routerProps, ok := stageConfig.Properties.(*RouterProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'router': expected *RouterProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'router': expected *RouterProperties, got %T",
+			stageConfig.Properties,
+		)
 	}
 
 	var routes []Route[any, any]
@@ -557,19 +945,22 @@ func routerBuilder(
 		}
 	}
 
-	return routerStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(routerStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func joinByKeyBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	joinByKeyProps, ok := props.(*JoinByKeyProperties)
+	joinByKeyProps, ok := stageConfig.Properties.(*JoinByKeyProperties)
 	if !ok {
 		return nil, fmt.Errorf(
 			"incorrect properties type for 'join_by_key': expected *JoinByKeyProperties, got %T",
-			props,
+			stageConfig.Properties,
 		)
 	}
 
@@ -602,19 +993,22 @@ func joinByKeyBuilder(
 		}
 	}
 
-	return joinStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(joinStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func tumblingCountWindowBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	_ *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	tumblingCountWindowProps, ok := props.(*TumblingCountWindowProperties)
+	tumblingCountWindowProps, ok := stageConfig.Properties.(*TumblingCountWindowProperties)
 	if !ok {
 		return nil, fmt.Errorf(
 			"incorrect properties type for 'tumbling_count_window': expected *TumblingCountWindowProperties, got %T",
-			props,
+			stageConfig.Properties,
 		)
 	}
 
@@ -625,19 +1019,22 @@ func tumblingCountWindowBuilder(
 
 	tumblingStage := NewTumblingCountWindow[any](windowSize)
 
-	return tumblingStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(tumblingStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func tumblingTimeWindowBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	_ *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	tumblingTimeWindowProps, ok := props.(*TumblingTimeWindowProperties)
+	tumblingTimeWindowProps, ok := stageConfig.Properties.(*TumblingTimeWindowProperties)
 	if !ok {
 		return nil, fmt.Errorf(
 			"incorrect properties type for 'tumbling_time_window': expected *TumblingTimeWindowProperties, got %T",
-			props,
+			stageConfig.Properties,
 		)
 	}
 
@@ -648,19 +1045,22 @@ func tumblingTimeWindowBuilder(
 
 	tumblingStage := NewTumblingTimeWindow[any](time.Duration(windowDuration) * time.Millisecond)
 
-	return tumblingStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(tumblingStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func slidingCountWindowBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	_ *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	slidingCountWindowProps, ok := props.(*SlidingCountWindowProperties)
+	slidingCountWindowProps, ok := stageConfig.Properties.(*SlidingCountWindowProperties)
 	if !ok {
 		return nil, fmt.Errorf(
 			"incorrect properties type for 'sliding_count_window': expected *SlidingCountWindowProperties, got %T",
-			props,
+			stageConfig.Properties,
 		)
 	}
 
@@ -675,19 +1075,22 @@ func slidingCountWindowBuilder(
 	}
 
 	slidingStage := NewSlidingCountWindow[any](windowSize, windowSlide)
-	return slidingStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(slidingStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func slidingTimeWindowBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	_ *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	slidingTimeWindowProps, ok := props.(*SlidingTimeWindowProperties)
+	slidingTimeWindowProps, ok := stageConfig.Properties.(*SlidingTimeWindowProperties)
 	if !ok {
 		return nil, fmt.Errorf(
 			"incorrect properties type for 'sliding_time_window': expected *SlidingTimeWindowProperties, got %T",
-			props,
+			stageConfig.Properties,
 		)
 	}
 
@@ -705,19 +1108,22 @@ func slidingTimeWindowBuilder(
 		time.Duration(windowDuration)*time.Millisecond,
 		time.Duration(windowSlideDuration)*time.Millisecond,
 	)
-	return slidingStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(slidingStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func circuitBreakerBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	_ *Registry,
 	nestedBuilder func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	circuitBreakerProps, ok := props.(*CircuitBreakerProperties)
+	circuitBreakerProps, ok := stageConfig.Properties.(*CircuitBreakerProperties)
 	if !ok {
 		return nil, fmt.Errorf(
 			"incorrect properties type for 'circuit_breaker': expected *CircuitBreakerProperties, got %T",
-			props,
+			stageConfig.Properties,
 		)
 	}
 
@@ -769,17 +1175,23 @@ func circuitBreakerBuilder(
 		options...,
 	)
 
-	return circuitBreakerStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(circuitBreakerStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func retryBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	nestedBuilder func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	retryProps, ok := props.(*RetryProperties)
+	retryProps, ok := stageConfig.Properties.(*RetryProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'retry': expected *RetryProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'retry': expected *RetryProperties, got %T",
+			stageConfig.Properties,
+		)
 	}
 
 	nestedStage, err := nestedBuilder(&retryProps.Stage)
@@ -840,17 +1252,23 @@ func retryBuilder(
 		}
 	}
 
-	return retryStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(retryStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func timeoutBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	nestedBuilder func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	timeoutProps, ok := props.(*TimeoutProperties)
+	timeoutProps, ok := stageConfig.Properties.(*TimeoutProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'timeout': expected *TimeoutProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'timeout': expected *TimeoutProperties, got %T",
+			stageConfig.Properties,
+		)
 	}
 
 	nestedStage, err := nestedBuilder(&timeoutProps.Stage)
@@ -886,19 +1304,22 @@ func timeoutBuilder(
 		}
 	}
 
-	return timeoutStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(timeoutStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func deadLetterQueueBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	nestedBuilder func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	deadLetterQueueProps, ok := props.(*DeadLetterQueueProperties)
+	deadLetterQueueProps, ok := stageConfig.Properties.(*DeadLetterQueueProperties)
 	if !ok {
 		return nil, fmt.Errorf(
 			"incorrect properties type for 'dead_letter_queue': expected *DeadLetterQueueProperties, got %T",
-			props,
+			stageConfig.Properties,
 		)
 	}
 
@@ -960,17 +1381,23 @@ func deadLetterQueueBuilder(
 
 	deadLetterQueueStage = NewDeadLetterQueue(nested, deadLetterOptions...)
 
-	return deadLetterQueueStage, nil
+	// Apply stage-level observability wrapping if enabled
+	stage := wrapStageWithObservability(deadLetterQueueStage, stageConfig, buildContext)
+	return stage, nil
 }
 
 func customBuilder(
-	props StageConfigurer,
+	stageConfig *StageConfig,
 	registry *Registry,
 	_ func(*StageConfig) (interface{}, error),
+	buildContext *BuildContext,
 ) (interface{}, error) {
-	customProps, ok := props.(*CustomProperties)
+	customProps, ok := stageConfig.Properties.(*CustomProperties)
 	if !ok {
-		return nil, fmt.Errorf("incorrect properties type for 'custom': expected *CustomProperties, got %T", props)
+		return nil, fmt.Errorf(
+			"incorrect properties type for 'custom': expected *CustomProperties, got %T",
+			stageConfig.Properties,
+		)
 	}
 
 	if customProps.Factory == "" {
@@ -984,16 +1411,24 @@ func customBuilder(
 		return nil, fmt.Errorf("no custom stage factory registered for name '%s'", customProps.Factory)
 	}
 
-	// The registered executor must be of type func(config map[string]any) (Stage[any, any], error)
-	stageFactory, ok := factoryFunc.(func(config map[string]any) (Stage[any, any], error))
+	// The registered executor must be a factory function that returns a stage.
+	// We expect func(config map[string]any) (interface{}, error) to allow maximum flexibility.
+	stageFactory, ok := factoryFunc.(func(config map[string]any) (interface{}, error))
 	if !ok {
 		return nil, fmt.Errorf(
-			"registered factory for '%s' is not a valid custom stage factory. Expected func(map[string]any) (Stage[any, any], error), got %T",
+			"registered factory for '%s' is not a valid custom stage factory. Expected func(map[string]any) (interface{}, error), got %T",
 			customProps.Factory,
 			factoryFunc,
 		)
 	}
 
 	// Call the factory with the provided config map.
-	return stageFactory(customProps.Config)
+	stage, err := stageFactory(customProps.Config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Apply stage-level observability wrapping if enabled
+	wrappedStage := wrapStageWithObservability(stage, stageConfig, buildContext)
+	return wrappedStage, nil
 }
