@@ -2,8 +2,10 @@ package fluxus
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/go-playground/validator/v10"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -89,7 +91,7 @@ func (sc *StageConfig) validate(validate *validator.Validate) error {
 
 // TracingType represents the type of tracing used in the pipeline.
 // It can be used to specify different tracing backends or methods.
-// Possible values could include "zipkin", "jaeger", "prometheus" or "noop".
+// Possible values include "zipkin", "jaeger", "otlp", or "noop".
 type TracingType string
 
 const (
@@ -97,8 +99,8 @@ const (
 	TracingTypeZipkin TracingType = "zipkin"
 	// TracingTypeJaeger represents Jaeger tracing.
 	TracingTypeJaeger TracingType = "jaeger"
-	// TracingTypePrometheus represents Prometheus tracing.
-	TracingTypePrometheus TracingType = "prometheus"
+	// TracingTypeOTLP represents OpenTelemetry Protocol tracing.
+	TracingTypeOTLP TracingType = "otlp"
 	// TracingTypeNoop represents no tracing.
 	TracingTypeNoop TracingType = "noop"
 )
@@ -112,12 +114,16 @@ type PipelineTracingConfig struct {
 
 // MetricsType represents the type of metrics used in the pipeline.
 // It can be used to specify different metrics backends or methods.
-// Possible values could include "mongodb" or "noop".
+// Possible values include "prometheus", "mongodb", "influxdb", or "noop".
 type MetricsType string
 
 const (
-	// MetricsTypeMongoDB represents MongoDB metrics.
+	// MetricsTypePrometheus represents Prometheus metrics collection.
+	MetricsTypePrometheus MetricsType = "prometheus"
+	// MetricsTypeMongoDB represents MongoDB metrics storage.
 	MetricsTypeMongoDB MetricsType = "mongodb"
+	// MetricsTypeInfluxDB represents InfluxDB metrics storage.
+	MetricsTypeInfluxDB MetricsType = "influxdb"
 	// MetricsTypeNoop represents no metrics.
 	MetricsTypeNoop MetricsType = "noop"
 )
@@ -126,7 +132,7 @@ const (
 type PipelineMetricsConfig struct {
 	Enabled  bool        `yaml:"enabled"`  // Whether metrics are enabled for the pipeline
 	Type     MetricsType `yaml:"type"`     // Type of metrics used in the pipeline
-	Endpoint string      `yaml:"endpoint"` // Endpoint for the metrics service (e.g., MongoDB URI) mongodb://localhost:27017
+	Endpoint string      `yaml:"endpoint"` // Endpoint for the metrics service (e.g., Prometheus gateway, MongoDB URI, InfluxDB URL)
 }
 
 // Executor represents a callable function that will be executed as a result of an event in the pipeline.
@@ -187,9 +193,11 @@ type StageConfigurer interface {
 
 // StageConfig holds the configuration for a single stage in a pipeline.
 type StageConfig struct {
-	Name       string          `yaml:"name"       validate:"required"` // Name of the stage
-	Type       StageType       `yaml:"type"       validate:"required"` // Type of the stage (e.g , "map", "buffer", "fan_out", etc.)
-	Properties StageConfigurer `yaml:"properties" validate:"required"` // Stage-specific properties, unmarshaled based on Type
+	Name       string          `yaml:"name"              validate:"required"` // Name of the stage
+	Type       StageType       `yaml:"type"              validate:"required"` // Type of the stage (e.g , "map", "buffer", "fan_out", etc.)
+	Properties StageConfigurer `yaml:"properties"        validate:"required"` // Stage-specific properties, unmarshaled based on Type
+	Metrics    bool            `yaml:"metrics,omitempty"`                     // Enable metrics for this stage using pipeline-level metrics configuration
+	Tracing    bool            `yaml:"tracing,omitempty"`                     // Enable tracing for this stage using pipeline-level tracing configuration
 }
 
 // validateNestedStages handles recursive validation for stages that contain other stages.
@@ -221,21 +229,27 @@ func (sc *StageConfig) validateNestedStages(validate *validator.Validate) error 
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface for StageConfig.
 func (sc *StageConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	// umarshal based on the type field
-	var stageType struct {
-		Name string    `yaml:"name"`
-		Type StageType `yaml:"type"`
+	// First, unmarshal into a temporary struct to get all fields including properties
+	var temp struct {
+		Name       string                 `yaml:"name"`
+		Type       StageType              `yaml:"type"`
+		Properties map[string]interface{} `yaml:"properties"`
+		Metrics    bool                   `yaml:"metrics,omitempty"`
+		Tracing    bool                   `yaml:"tracing,omitempty"`
 	}
 
-	if err := unmarshal(&stageType); err != nil {
+	if err := unmarshal(&temp); err != nil {
 		return err
 	}
 
-	sc.Name = stageType.Name
-	sc.Type = stageType.Type
+	sc.Name = temp.Name
+	sc.Type = temp.Type
+	sc.Metrics = temp.Metrics
+	sc.Tracing = temp.Tracing
 
+	// Create the appropriate properties struct based on type
 	var props StageConfigurer
-	switch stageType.Type {
+	switch temp.Type {
 	case StageTypeMap:
 		props = &MapProperties{}
 	case StageTypeBuffer:
@@ -274,15 +288,16 @@ func (sc *StageConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		return fmt.Errorf("unsupported stage type '%s' for stage '%s'", sc.Type, sc.Name)
 	}
 
-	// 3. Unmarshal the 'properties' field into the specific struct.
-	var propsWrapper struct {
-		Properties interface{} `yaml:"properties"`
-	}
+	// Convert the map to YAML and unmarshal into the typed struct
+	if len(temp.Properties) > 0 {
+		propsYAML, err := yaml.Marshal(temp.Properties)
+		if err != nil {
+			return fmt.Errorf("failed to marshal properties for stage '%s': %w", sc.Name, err)
+		}
 
-	propsWrapper.Properties = props // Point to our typed struct
-
-	if err := unmarshal(&propsWrapper); err != nil {
-		return fmt.Errorf("failed to unmarshal properties for stage '%s' (type %s): %w", sc.Name, sc.Type, err)
+		if err := yaml.Unmarshal(propsYAML, props); err != nil {
+			return fmt.Errorf("failed to unmarshal properties for stage '%s' (type %s): %w", sc.Name, sc.Type, err)
+		}
 	}
 
 	sc.Properties = props
@@ -455,3 +470,27 @@ type CustomProperties struct {
 
 // IsStageConfigurer is a marker method to make CustomProperties implement StageConfigurer interface.
 func (c *CustomProperties) IsStageConfigurer() {}
+
+// LoadPipelineConfigFromFile loads a pipeline configuration from a YAML file.
+func LoadPipelineConfigFromFile(filename string) (*PipelineConfig, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file '%s': %w", filename, err)
+	}
+
+	return LoadPipelineConfigFromYAML(data)
+}
+
+// LoadPipelineConfigFromYAML loads a pipeline configuration from YAML bytes.
+func LoadPipelineConfigFromYAML(data []byte) (*PipelineConfig, error) {
+	var config PipelineConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal YAML: %w", err)
+	}
+
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return &config, nil
+}
